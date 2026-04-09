@@ -1,5 +1,8 @@
 # GrayMatter
 
+[![CI](https://github.com/angelnicolasc/graymatter/actions/workflows/ci.yml/badge.svg)](https://github.com/angelnicolasc/graymatter/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/angelnicolasc/graymatter.svg)](https://pkg.go.dev/github.com/angelnicolasc/graymatter)
+
 Your AI agents forget everything between runs. GrayMatter fixes that.
 
 Single Go binary. Zero infra. Works with Claude Code, or any
@@ -26,7 +29,7 @@ Mem0, Zep, Supermemory solve this — but in Python or TypeScript, and they
 require a server. Go has zero production-ready, embeddable, zero-deps
 memory layer for agents. That gap is GrayMatter.
 
-**~90% token reduction** after 10 sessions versus full-history injection.
+**~90% token reduction** at 100 sessions versus full-history injection.
 No Docker. No Redis. No Python. No API key required for storage.
 
 ---
@@ -106,10 +109,11 @@ mem.Remember(skill.Name, extractKeyFacts(response))
 mem, err := graymatter.NewWithConfig(graymatter.Config{
     DataDir:          ".graymatter",
     TopK:             8,
-    EmbeddingMode:    graymatter.EmbeddingAuto,  // Ollama → Anthropic → keyword
+    EmbeddingMode:    graymatter.EmbeddingAuto,  // Ollama → OpenAI → Anthropic → keyword
     OllamaURL:        "http://localhost:11434",
     OllamaModel:      "nomic-embed-text",
     AnthropicAPIKey:  os.Getenv("ANTHROPIC_API_KEY"),
+    OpenAIAPIKey:     os.Getenv("OPENAI_API_KEY"),
     DecayHalfLife:    30 * 24 * time.Hour,        // 30 days
     AsyncConsolidate: true,
 })
@@ -120,15 +124,21 @@ mem, err := graymatter.NewWithConfig(graymatter.Config{
 ## CLI
 
 ```bash
-graymatter init                                   # create .graymatter/ + .mcp.json
-graymatter remember "agent" "text to remember"   # store a fact
-graymatter recall   "agent" "query"              # print context
-graymatter checkpoint list    "agent"            # show saved checkpoints
-graymatter checkpoint resume  "agent"            # print latest checkpoint as JSON
-graymatter mcp serve                             # start MCP server (Claude Code / Cursor)
-graymatter mcp serve --http :8080                # HTTP transport
-graymatter export --format obsidian --out ~/vault  # dump to Obsidian vault
-graymatter tui                                   # terminal UI: browse + edit memories
+graymatter init                                    # create .graymatter/ + .mcp.json
+graymatter remember "agent" "text to remember"    # store a fact
+graymatter remember --shared "text"               # store in shared namespace (all agents)
+graymatter recall   "agent" "query"               # print context
+graymatter recall   --all "agent" "query"         # merge agent + shared memory
+graymatter checkpoint list    "agent"             # show saved checkpoints
+graymatter checkpoint resume  "agent"             # print latest checkpoint as JSON
+graymatter mcp serve                              # start MCP server (Claude Code / Cursor)
+graymatter mcp serve --http :8080                 # HTTP transport
+graymatter export --format obsidian --out ~/vault # dump to Obsidian vault
+graymatter tui                                    # 4-view terminal UI
+graymatter run agent.md [--background]            # run a SKILL.md agent file
+graymatter sessions list                          # list managed agent sessions
+graymatter plugin install manifest.json           # install a plugin
+graymatter server --addr :8080                    # REST API server
 ```
 
 Global flags: `--dir` (data dir), `--quiet`, `--json`
@@ -141,7 +151,7 @@ Global flags: `--dir` (data dir), `--quiet`, `--json`
 graymatter init     # creates .mcp.json automatically
 ```
 
-Claude Code detects `.mcp.json` automatically. Four tools become available:
+Claude Code detects `.mcp.json` automatically. Five tools become available:
 
 | Tool | What it does |
 |------|-------------|
@@ -149,6 +159,7 @@ Claude Code detects `.mcp.json` automatically. Four tools become available:
 | `memory_add` | Store a new fact |
 | `checkpoint_save` | Snapshot current session |
 | `checkpoint_resume` | Restore last checkpoint |
+| `memory_reflect` | Add / update / forget / link memories (agent self-edit) |
 
 Or add manually to your project's `.mcp.json`:
 
@@ -169,7 +180,7 @@ Or add manually to your project's `.mcp.json`:
 
 | Layer | Tech | What it holds |
 |-------|------|--------------|
-| KV store | bbolt (pure Go, ACID) | Sessions, checkpoints, facts, metadata |
+| KV store | bbolt (pure Go, ACID) | Sessions, checkpoints, facts, metadata, KG |
 | Vector index | chromem-go (pure Go) | Semantic embeddings, hybrid retrieval |
 | Export | Markdown files | Human-readable, git-friendly, Obsidian-compatible |
 
@@ -187,12 +198,19 @@ GrayMatter degrades gracefully. It works without any embedding model.
 | Mode | When |
 |------|------|
 | **Ollama** (default) | Machine has Ollama running with `nomic-embed-text` |
-| **Anthropic** | `ANTHROPIC_API_KEY` set, Ollama not available |
+| **OpenAI** | `OPENAI_API_KEY` set, Ollama not available |
+| **Anthropic** | `ANTHROPIC_API_KEY` set, Ollama and OpenAI not available |
 | **Keyword-only** | No embedding available — TF-IDF + recency, zero deps |
 
+Auto-detection order in `EmbeddingAuto` mode: Ollama → OpenAI → Anthropic → keyword.
+
 ```bash
-# Pull the embedding model once:
+# Pull the embedding model once (Ollama):
 ollama pull nomic-embed-text
+
+# Or set an API key (OpenAI or Anthropic):
+export OPENAI_API_KEY=sk-...
+export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
 ---
@@ -214,19 +232,36 @@ Consolidate() [async]        ← summarise + decay + prune (LLM optional)
 Consolidation is the only "smart" step. Everything else is deterministic.
 Without consolidation, GrayMatter still works — it just doesn't compress over time.
 
+Consolidation auto-enables when `ANTHROPIC_API_KEY` is set. To use Ollama:
+
+```go
+cfg := graymatter.DefaultConfig()
+cfg.ConsolidateLLM = "ollama"
+```
+
 ---
 
 ## Token efficiency
 
-| Sessions | Full injection | GrayMatter |
-|----------|---------------|------------|
-| 1        | ~800 tokens   | ~800 tokens |
-| 10       | ~4,800 tokens | ~900 tokens |
-| 30       | ~12,000 tokens | ~1,100 tokens |
-| 100      | ~40,000 tokens | ~1,200 tokens |
+Numbers produced by `go run ./benchmarks/token_count` — real Recall calls,
+keyword embedder, no LLM required:
 
-**~90% token reduction.** Context quality improves over time as consolidation
-removes noise and surfaces the facts that actually matter.
+| Sessions | Full injection | GrayMatter | Reduction |
+|----------|---------------|------------|-----------|
+| 1        | ~80 tokens    | ~80 tokens | 0% |
+| 10       | ~630 tokens   | ~550 tokens | 12% |
+| 30       | ~1,880 tokens | ~550 tokens | 71% |
+| 100      | ~6,960 tokens | ~670 tokens | **90%** |
+
+Each "session" = one paragraph-length agent observation (~60 words).
+GrayMatter always injects only the top-8 most relevant observations for the query.
+With vector embeddings the recall precision improves, maintaining similar reduction ratios.
+
+Reproduce locally:
+
+```bash
+go run ./benchmarks/token_count
+```
 
 ---
 
@@ -239,6 +274,31 @@ CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=dev" -o graymatter ./cmd/
 ```
 
 Output: single static binary, ~10 MB, no runtime dependencies.
+
+---
+
+## Testing
+
+The full test suite requires no LLM and no network — all tests use
+`t.TempDir()` and a keyword embedder or injected stubs:
+
+```bash
+CGO_ENABLED=0 go test ./... -count=1 -timeout=120s
+```
+
+| Package | Tests | What's covered |
+|---------|-------|----------------|
+| `pkg/harness` | 16 | Agent file parsing, retry/backoff logic, session recovery |
+| `pkg/kg` | 21 | Graph CRUD, entity extraction, weight decay, Obsidian export |
+| `pkg/memory` | 6 | Shared memory namespace, RRF deduplication |
+| `pkg/plugin` | 10 | Install, list, remove, E2E echo plugin binary |
+| `pkg/server` | 9 | All REST endpoints, 400/503 error handling |
+
+Token-reduction benchmark (also zero deps):
+
+```bash
+go run ./benchmarks/token_count
+```
 
 ---
 
@@ -258,16 +318,17 @@ packaged as a library you import in two lines.
 
 - [x] Library: `Remember` / `Recall` / `Consolidate`
 - [x] bbolt + chromem-go storage
-- [x] Ollama + Anthropic + keyword-only embedding
-- [x] Hybrid retrieval (RRF fusion)
-- [x] CLI: `init remember recall checkpoint export`
-- [x] MCP server (Claude Code / Cursor)
-- [x] Obsidian vault export
-- [x] Bubbletea TUI
-- [ ] Knowledge graph (entity extraction + linking)
-- [ ] Shared memory across agents
-- [ ] REST API server mode
-- [ ] OpenAI embeddings support
+- [x] Ollama + OpenAI + Anthropic + keyword-only embedding
+- [x] Hybrid retrieval (vector + keyword + recency, RRF fusion)
+- [x] CLI: `init remember recall checkpoint export run sessions plugin server`
+- [x] MCP server (Claude Code / Cursor) + `memory_reflect` self-edit tool
+- [x] Knowledge graph (entity extraction, node/edge linking, Obsidian export)
+- [x] Shared memory across agents (`--shared`, `--all` flags, `__shared__` namespace)
+- [x] REST API server mode (`graymatter server --addr :8080`)
+- [x] Plugin system (JSON line protocol, `graymatter plugin install/list/remove`)
+- [x] 4-view Bubble Tea TUI (Memory / Sessions / Knowledge Graph / Stats)
+- [ ] Ollama-backed consolidation LLM (Ollama as summariser, not just embedder)
+- [ ] WebSocket streaming for REST API
 
 ---
 

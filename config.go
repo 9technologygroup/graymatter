@@ -10,18 +10,20 @@ type EmbeddingMode int
 
 const (
 	// EmbeddingAuto detects the best available provider at runtime.
+	// Detection order: Ollama → OpenAI → Anthropic → keyword-only.
 	EmbeddingAuto EmbeddingMode = iota
-	// EmbeddingOllama forces Ollama (fails if not reachable).
+	// EmbeddingOllama forces Ollama (requires a running Ollama instance).
 	EmbeddingOllama
 	// EmbeddingAnthropic forces Anthropic API (requires ANTHROPIC_API_KEY).
 	EmbeddingAnthropic
-	// EmbeddingKeyword disables vector search; uses keyword+recency only.
+	// EmbeddingKeyword disables vector search; uses keyword+recency scoring only.
 	EmbeddingKeyword
 	// EmbeddingOpenAI forces OpenAI Embeddings API (requires OPENAI_API_KEY).
 	EmbeddingOpenAI
 )
 
-// Config holds all GrayMatter configuration. All fields have sane defaults.
+// Config holds all GrayMatter configuration. All fields have sane defaults
+// via DefaultConfig(). Zero-value Config is not valid — always call DefaultConfig().
 type Config struct {
 	// DataDir is the directory where gray.db and vector files are stored.
 	// Default: ".graymatter"
@@ -32,18 +34,18 @@ type Config struct {
 	TopK int
 
 	// EmbeddingMode controls which embedding backend is used.
-	// Default: EmbeddingAuto
+	// Default: EmbeddingAuto (Ollama → OpenAI → Anthropic → keyword)
 	EmbeddingMode EmbeddingMode
 
 	// OllamaURL is the base URL of the Ollama API.
-	// Default: "http://localhost:11434"
+	// Default: value of GRAYMATTER_OLLAMA_URL env var, or "http://localhost:11434"
 	OllamaURL string
 
 	// OllamaModel is the embedding model used with Ollama.
-	// Default: "nomic-embed-text"
+	// Default: value of GRAYMATTER_OLLAMA_MODEL env var, or "nomic-embed-text"
 	OllamaModel string
 
-	// AnthropicAPIKey for the Anthropic embeddings endpoint.
+	// AnthropicAPIKey for the Anthropic embeddings and consolidation endpoints.
 	// Default: value of ANTHROPIC_API_KEY env var.
 	AnthropicAPIKey string
 
@@ -52,24 +54,25 @@ type Config struct {
 	OpenAIAPIKey string
 
 	// OpenAIModel overrides the OpenAI embedding model.
-	// Default: "text-embedding-3-small"
+	// Default: value of GRAYMATTER_OPENAI_MODEL env var, or "text-embedding-3-small"
 	OpenAIModel string
 
-	// ConsolidateLLM specifies which LLM provider drives consolidation.
+	// ConsolidateLLM specifies which LLM provider drives memory consolidation.
 	// Values: "anthropic", "ollama", "" (disable consolidation).
-	// Default: "anthropic" if key present, else "ollama" if reachable, else ""
+	// Default: "anthropic" if ANTHROPIC_API_KEY is set, else "" (disabled).
+	// To use Ollama as the consolidation LLM, set this field explicitly to "ollama".
 	ConsolidateLLM string
 
 	// ConsolidateModel is the model used for consolidation summarisation.
-	// Default: "claude-haiku-4-5-20251001" (fast + cheap)
+	// Default: "claude-haiku-4-5-20251001"
 	ConsolidateModel string
 
-	// ConsolidateThreshold is the fact count that triggers consolidation.
+	// ConsolidateThreshold is the minimum fact count that triggers consolidation.
 	// Default: 100
 	ConsolidateThreshold int
 
 	// DecayHalfLife is the half-life for the exponential weight decay curve.
-	// Facts not accessed within this window lose half their weight.
+	// Facts not accessed within this window lose half their retrieval weight.
 	// Default: 720h (30 days)
 	DecayHalfLife time.Duration
 
@@ -78,7 +81,8 @@ type Config struct {
 	AsyncConsolidate bool
 }
 
-// DefaultConfig returns a Config with all defaults applied.
+// DefaultConfig returns a Config with all defaults applied from environment
+// variables and runtime probes. Safe to call multiple times.
 func DefaultConfig() Config {
 	return Config{
 		DataDir:              ".graymatter",
@@ -89,12 +93,31 @@ func DefaultConfig() Config {
 		AnthropicAPIKey:      os.Getenv("ANTHROPIC_API_KEY"),
 		OpenAIAPIKey:         os.Getenv("OPENAI_API_KEY"),
 		OpenAIModel:          envOrDefault("GRAYMATTER_OPENAI_MODEL", "text-embedding-3-small"),
-		ConsolidateLLM:       "",
+		ConsolidateLLM:       resolveConsolidateLLM(),
 		ConsolidateModel:     "claude-haiku-4-5-20251001",
 		ConsolidateThreshold: 100,
 		DecayHalfLife:        720 * time.Hour,
 		AsyncConsolidate:     true,
 	}
+}
+
+// resolveConsolidateLLM returns the best available consolidation LLM based on
+// environment variables. It does NOT probe network endpoints at startup.
+//
+// Detection order:
+//  1. "anthropic" — if ANTHROPIC_API_KEY is set
+//  2. ""          — disabled (set ConsolidateLLM="ollama" explicitly for Ollama)
+//
+// Ollama is excluded from auto-detection because probing the Ollama endpoint on
+// every process startup would add 500 ms+ of latency. Configure it explicitly:
+//
+//	cfg := graymatter.DefaultConfig()
+//	cfg.ConsolidateLLM = "ollama"
+func resolveConsolidateLLM() string {
+	if os.Getenv("ANTHROPIC_API_KEY") != "" {
+		return "anthropic"
+	}
+	return ""
 }
 
 func envOrDefault(key, def string) string {
