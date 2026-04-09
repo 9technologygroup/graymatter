@@ -39,6 +39,7 @@ func main() {
 		runCmd(),
 		sessionsCmd(),
 		pluginCmd(),
+		serverCmd(),
 	)
 
 	if err := rootCmd.Execute(); err != nil {
