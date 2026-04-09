@@ -1,0 +1,7 @@
+graymatter.exe
+/graymatter
+dist/
+.graymatter/
+*.db
+/vectors/
+GRAYMATTER_PLAYBOOK.md

@@ -1,0 +1,302 @@
+package memory
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"path/filepath"
+	"sync"
+	"time"
+
+	chromem "github.com/philippgille/chromem-go"
+	bolt "go.etcd.io/bbolt"
+
+	"github.com/angelnicolasc/graymatter/pkg/embedding"
+)
+
+var (
+	bucketFacts    = []byte("facts")
+	bucketSessions = []byte("sessions")
+	bucketMeta     = []byte("meta")
+	bucketAgents   = []byte("agents")
+)
+
+// StoreConfig is passed to Open to configure the Store.
+type StoreConfig struct {
+	DataDir       string
+	Embedder      embedding.Provider
+	DecayHalfLife time.Duration
+}
+
+// Store is the central storage layer. It combines bbolt for durable
+// structured storage with chromem-go for in-process vector similarity search.
+// All public methods are safe for concurrent use.
+type Store struct {
+	db       *bolt.DB
+	vdb      *chromem.DB
+	embedder embedding.Provider
+	cfg      StoreConfig
+
+	mu         sync.RWMutex
+	collection map[string]*chromem.Collection // agentID → collection
+}
+
+// Open creates or opens the GrayMatter store at cfg.DataDir.
+func Open(cfg StoreConfig) (*Store, error) {
+	dbPath := filepath.Join(cfg.DataDir, "gray.db")
+	db, err := bolt.Open(dbPath, 0o600, &bolt.Options{Timeout: 5 * time.Second})
+	if err != nil {
+		return nil, fmt.Errorf("open bbolt: %w", err)
+	}
+
+	// Ensure top-level buckets exist.
+	if err := db.Update(func(tx *bolt.Tx) error {
+		for _, name := range [][]byte{bucketFacts, bucketSessions, bucketMeta, bucketAgents} {
+			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("init buckets: %w", err)
+	}
+
+	vecDir := filepath.Join(cfg.DataDir, "vectors")
+	vdb, err := chromem.NewPersistentDB(vecDir, false)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("open chromem: %w", err)
+	}
+
+	s := &Store{
+		db:         db,
+		vdb:        vdb,
+		embedder:   cfg.Embedder,
+		cfg:        cfg,
+		collection: make(map[string]*chromem.Collection),
+	}
+
+	// Hydrate known agent IDs so collections are ready.
+	_ = s.loadAgents()
+
+	return s, nil
+}
+
+// Put stores a new observation for agentID.
+func (s *Store) Put(ctx context.Context, agentID, text string) error {
+	var emb []float32
+	if s.embedder != nil {
+		var err error
+		emb, err = s.embedder.Embed(ctx, text)
+		if err != nil {
+			// Non-fatal: fall back to keyword-only for this fact.
+			emb = nil
+		}
+	}
+
+	f := newFact(agentID, text, emb)
+
+	// Persist to bbolt.
+	if err := s.db.Update(func(tx *bolt.Tx) error {
+		b, err := tx.Bucket(bucketFacts).CreateBucketIfNotExists([]byte(agentID))
+		if err != nil {
+			return err
+		}
+		data, err := f.marshal()
+		if err != nil {
+			return err
+		}
+		if err := b.Put([]byte(f.ID), data); err != nil {
+			return err
+		}
+		// Register agent.
+		return tx.Bucket(bucketAgents).Put([]byte(agentID), []byte("1"))
+	}); err != nil {
+		return fmt.Errorf("put fact: %w", err)
+	}
+
+	// Add to vector index if we have an embedding.
+	if len(emb) > 0 {
+		if err := s.addToVector(ctx, agentID, f); err != nil {
+			// Non-fatal: bbolt write already succeeded.
+			_ = err
+		}
+	}
+
+	return nil
+}
+
+// Delete removes a fact by ID for agentID.
+func (s *Store) Delete(agentID, factID string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketFacts).Bucket([]byte(agentID))
+		if b == nil {
+			return nil
+		}
+		return b.Delete([]byte(factID))
+	})
+}
+
+// List returns all facts for agentID, sorted newest first.
+func (s *Store) List(agentID string) ([]Fact, error) {
+	var facts []Fact
+	if err := s.db.View(func(tx *bolt.Tx) error {
+		parent := tx.Bucket(bucketFacts)
+		b := parent.Bucket([]byte(agentID))
+		if b == nil {
+			return nil
+		}
+		return b.ForEach(func(_, v []byte) error {
+			f, err := unmarshalFact(v)
+			if err != nil {
+				return nil // skip corrupt entries
+			}
+			facts = append(facts, f)
+			return nil
+		})
+	}); err != nil {
+		return nil, err
+	}
+	// Sort newest first.
+	sortFactsByTime(facts)
+	return facts, nil
+}
+
+// ListAgents returns all known agent IDs.
+func (s *Store) ListAgents() ([]string, error) {
+	var agents []string
+	if err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketAgents).ForEach(func(k, _ []byte) error {
+			agents = append(agents, string(k))
+			return nil
+		})
+	}); err != nil {
+		return nil, err
+	}
+	return agents, nil
+}
+
+// Stats returns aggregate statistics for agentID.
+func (s *Store) Stats(agentID string) (MemoryStats, error) {
+	facts, err := s.List(agentID)
+	if err != nil {
+		return MemoryStats{}, err
+	}
+	st := MemoryStats{AgentID: agentID, FactCount: len(facts)}
+	if len(facts) == 0 {
+		return st, nil
+	}
+	var weightSum float64
+	st.OldestAt = facts[0].CreatedAt
+	st.NewestAt = facts[0].CreatedAt
+	for _, f := range facts {
+		weightSum += f.Weight
+		if f.CreatedAt.Before(st.OldestAt) {
+			st.OldestAt = f.CreatedAt
+		}
+		if f.CreatedAt.After(st.NewestAt) {
+			st.NewestAt = f.CreatedAt
+		}
+	}
+	st.AvgWeight = weightSum / float64(len(facts))
+	return st, nil
+}
+
+// UpdateFact persists a modified fact (used by consolidation + decay).
+func (s *Store) UpdateFact(agentID string, f Fact) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketFacts).Bucket([]byte(agentID))
+		if b == nil {
+			return nil
+		}
+		data, err := f.marshal()
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(f.ID), data)
+	})
+}
+
+// Close flushes and closes the underlying stores.
+func (s *Store) Close() error {
+	return s.db.Close()
+}
+
+// DB exposes the raw bbolt handle (used by session package).
+func (s *Store) DB() *bolt.DB {
+	return s.db
+}
+
+// --- internal helpers ---
+
+func (s *Store) loadAgents() error {
+	agents, err := s.ListAgents()
+	if err != nil {
+		return err
+	}
+	for _, id := range agents {
+		s.ensureCollection(id)
+	}
+	return nil
+}
+
+func (s *Store) ensureCollection(agentID string) *chromem.Collection {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if c, ok := s.collection[agentID]; ok {
+		return c
+	}
+	c, _ := s.vdb.GetOrCreateCollection(agentID, nil, nil)
+	s.collection[agentID] = c
+	return c
+}
+
+func (s *Store) addToVector(ctx context.Context, agentID string, f Fact) error {
+	c := s.ensureCollection(agentID)
+	metadata := map[string]string{
+		"agent_id":   agentID,
+		"created_at": f.CreatedAt.Format(time.RFC3339),
+	}
+	doc := chromem.Document{
+		ID:        f.ID,
+		Content:   f.Text,
+		Metadata:  metadata,
+		Embedding: f.Embedding,
+	}
+	return c.AddDocument(ctx, doc)
+}
+
+// vectorSearch returns at most n results from the vector index.
+func (s *Store) vectorSearch(ctx context.Context, agentID, query string, n int) ([]chromem.Result, error) {
+	c := s.ensureCollection(agentID)
+	if c == nil {
+		return nil, nil
+	}
+	// Generate query embedding.
+	var qEmb []float32
+	if s.embedder != nil {
+		var err error
+		qEmb, err = s.embedder.Embed(ctx, query)
+		if err != nil || len(qEmb) == 0 {
+			return nil, nil
+		}
+	}
+	if len(qEmb) == 0 {
+		return nil, nil
+	}
+	return c.QueryEmbedding(ctx, qEmb, n, nil, nil)
+}
+
+// marshalJSON helper for meta bucket.
+func marshalJSON(v any) ([]byte, error) {
+	return json.Marshal(v)
+}
+
+func sortFactsByTime(facts []Fact) {
+	for i := 1; i < len(facts); i++ {
+		for j := i; j > 0 && facts[j].CreatedAt.After(facts[j-1].CreatedAt); j-- {
+			facts[j], facts[j-1] = facts[j-1], facts[j]
+		}
+	}
+}

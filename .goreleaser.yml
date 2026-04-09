@@ -1,0 +1,79 @@
+version: 2
+
+project_name: graymatter
+
+before:
+  hooks:
+    - go mod tidy
+    - go generate ./...
+
+builds:
+  - id: graymatter
+    main: ./cmd/graymatter
+    binary: graymatter
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+
+archives:
+  - id: default
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+      - LICENSE
+      - .mcp.json
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^chore:"
+      - Merge pull request
+      - Merge branch
+
+release:
+  github:
+    owner: graymatter-ai
+    name: graymatter
+  draft: false
+  prerelease: auto
+  name_template: "GrayMatter {{.Tag}}"
+  header: |
+    ## GrayMatter {{.Tag}}
+
+    Persistent memory for Go AI agents. Single binary. Zero infra.
+
+    ### Quick install
+
+    ```bash
+    # macOS / Linux
+    curl -sSL https://github.com/angelnicolasc/graymatter/releases/download/{{.Tag}}/graymatter_{{.Tag}}_$(uname -s)_$(uname -m).tar.gz | tar xz
+    sudo mv graymatter /usr/local/bin/
+
+    # Go install
+    go install github.com/angelnicolasc/graymatter/cmd/graymatter@{{.Tag}}
+    ```

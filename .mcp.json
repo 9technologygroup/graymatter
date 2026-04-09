@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "graymatter": {
+      "command": "graymatter",
+      "args": ["mcp", "serve"],
+      "description": "Persistent memory for AI agents — GrayMatter"
+    }
+  }
+}
