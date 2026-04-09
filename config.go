@@ -17,6 +17,8 @@ const (
 	EmbeddingAnthropic
 	// EmbeddingKeyword disables vector search; uses keyword+recency only.
 	EmbeddingKeyword
+	// EmbeddingOpenAI forces OpenAI Embeddings API (requires OPENAI_API_KEY).
+	EmbeddingOpenAI
 )
 
 // Config holds all GrayMatter configuration. All fields have sane defaults.
@@ -44,6 +46,14 @@ type Config struct {
 	// AnthropicAPIKey for the Anthropic embeddings endpoint.
 	// Default: value of ANTHROPIC_API_KEY env var.
 	AnthropicAPIKey string
+
+	// OpenAIAPIKey for the OpenAI Embeddings API (text-embedding-3-small).
+	// Default: value of OPENAI_API_KEY env var.
+	OpenAIAPIKey string
+
+	// OpenAIModel overrides the OpenAI embedding model.
+	// Default: "text-embedding-3-small"
+	OpenAIModel string
 
 	// ConsolidateLLM specifies which LLM provider drives consolidation.
 	// Values: "anthropic", "ollama", "" (disable consolidation).
@@ -77,6 +87,8 @@ func DefaultConfig() Config {
 		OllamaURL:            envOrDefault("GRAYMATTER_OLLAMA_URL", "http://localhost:11434"),
 		OllamaModel:          envOrDefault("GRAYMATTER_OLLAMA_MODEL", "nomic-embed-text"),
 		AnthropicAPIKey:      os.Getenv("ANTHROPIC_API_KEY"),
+		OpenAIAPIKey:         os.Getenv("OPENAI_API_KEY"),
+		OpenAIModel:          envOrDefault("GRAYMATTER_OPENAI_MODEL", "text-embedding-3-small"),
 		ConsolidateLLM:       "",
 		ConsolidateModel:     "claude-haiku-4-5-20251001",
 		ConsolidateThreshold: 100,

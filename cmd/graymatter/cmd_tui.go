@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -11,37 +12,79 @@ import (
 	"github.com/spf13/cobra"
 
 	graymatter "github.com/angelnicolasc/graymatter"
+	"github.com/angelnicolasc/graymatter/pkg/harness"
+	"github.com/angelnicolasc/graymatter/pkg/kg"
 	"github.com/angelnicolasc/graymatter/pkg/memory"
 )
 
 // ── Styles ────────────────────────────────────────────────────────────────────
 
 var (
+	colorAccent  = lipgloss.Color("#5F5FFF")
+	colorOrange  = lipgloss.Color("#FF875F")
+	colorDim     = lipgloss.Color("#777777")
+	colorGreen   = lipgloss.Color("#5FAF5F")
+	colorRed     = lipgloss.Color("#FF5F5F")
+	colorYellow  = lipgloss.Color("#FFAF00")
+	colorWhite   = lipgloss.Color("#FFFFFF")
+
 	styleTitle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("#FFFFFF")).
-			Background(lipgloss.Color("#5F5FFF")).
+			Foreground(colorWhite).
+			Background(colorAccent).
 			Padding(0, 1)
 
-	styleBorder = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#5F5FFF"))
-
-	styleSelected = lipgloss.NewStyle().
+	styleTabActive = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color("#5F5FFF"))
+			Foreground(colorWhite).
+			Background(colorAccent).
+			Padding(0, 2)
 
-	styleDim = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#777777"))
+	styleTabInactive = lipgloss.NewStyle().
+				Foreground(colorDim).
+				Padding(0, 2)
+
+	styleBorderActive = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(colorOrange)
+
+	styleBorderInactive = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(colorAccent)
 
 	styleHelp = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#444444")).
+			Foreground(colorDim).
 			Padding(0, 1)
+
+	styleDimText = lipgloss.NewStyle().
+			Foreground(colorDim)
+
+	styleStatusOK      = lipgloss.NewStyle().Foreground(colorGreen)
+	styleStatusFail    = lipgloss.NewStyle().Foreground(colorRed)
+	styleStatusPending = lipgloss.NewStyle().Foreground(colorYellow)
 )
+
+// ── Tab definitions ───────────────────────────────────────────────────────────
+
+type tabID int
+
+const (
+	tabMemory   tabID = iota // 3-pane memory browser
+	tabSessions              // harness sessions list
+	tabGraph                 // knowledge graph nodes
+	tabStats                 // per-agent statistics
+)
+
+var tabNames = []string{"Memory", "Sessions", "Graph", "Stats"}
 
 // ── List item types ───────────────────────────────────────────────────────────
 
-type agentItem struct{ id string; count int }
+// --- Memory tab ---
+
+type agentItem struct {
+	id    string
+	count int
+}
 
 func (a agentItem) Title() string       { return a.id }
 func (a agentItem) Description() string { return fmt.Sprintf("%d facts", a.count) }
@@ -57,39 +100,125 @@ func (f factItem) Title() string {
 	return preview
 }
 func (f factItem) Description() string {
-	return fmt.Sprintf("weight: %.3f · %s", f.fact.Weight, f.fact.CreatedAt.Format("2006-01-02"))
+	return fmt.Sprintf("weight %.3f · %s", f.fact.Weight, f.fact.CreatedAt.Format("2006-01-02"))
 }
 func (f factItem) FilterValue() string { return f.fact.Text }
 
-// ── TUI model ─────────────────────────────────────────────────────────────────
+// --- Sessions tab ---
 
-type pane int
+type sessionItem struct{ s harness.HarnessSession }
+
+func (s sessionItem) Title() string {
+	age := ""
+	if !s.s.StartedAt.IsZero() {
+		age = " · " + time.Since(s.s.StartedAt).Truncate(time.Second).String() + " ago"
+	}
+	return s.s.AgentFile + age
+}
+func (s sessionItem) Description() string {
+	st := statusStyle(s.s.Status)
+	return fmt.Sprintf("%s  %s", st, s.s.ID)
+}
+func (s sessionItem) FilterValue() string { return s.s.ID + s.s.AgentFile }
+
+func statusStyle(status string) string {
+	switch status {
+	case "running":
+		return styleStatusOK.Render("● running")
+	case "success":
+		return styleStatusOK.Render("✓ success")
+	case "failed", "killed":
+		return styleStatusFail.Render("✗ " + status)
+	default:
+		return styleStatusPending.Render("○ " + status)
+	}
+}
+
+// --- Graph tab ---
+
+type nodeItem struct{ n kg.Node }
+
+func (n nodeItem) Title() string { return n.n.Label + " [" + n.n.EntityType + "]" }
+func (n nodeItem) Description() string {
+	return fmt.Sprintf("id: %s · weight %.3f · seen %s",
+		n.n.ID[:min(12, len(n.n.ID))], n.n.Weight,
+		n.n.LastSeen.Format("2006-01-02"))
+}
+func (n nodeItem) FilterValue() string { return n.n.Label + " " + n.n.EntityType }
+
+// --- Stats tab ---
+
+type statItem struct {
+	agent string
+	st    memory.MemoryStats
+}
+
+func (s statItem) Title() string { return s.agent }
+func (s statItem) Description() string {
+	if s.st.FactCount == 0 {
+		return "no facts"
+	}
+	return fmt.Sprintf("%d facts · avg weight %.3f · newest %s",
+		s.st.FactCount, s.st.AvgWeight, s.st.NewestAt.Format("2006-01-02"))
+}
+func (s statItem) FilterValue() string { return s.agent }
+
+// ── Messages ──────────────────────────────────────────────────────────────────
+
+type agentsLoadedMsg struct{ agents []agentItem }
+type factsLoadedMsg struct{ facts []factItem }
+type sessionsLoadedMsg struct{ sessions []sessionItem }
+type nodesLoadedMsg struct{ nodes []nodeItem }
+type statsLoadedMsg struct{ stats []statItem }
+type errMsg struct{ err error }
+type statusMsg struct{ text string }
+
+// ── Pane within memory tab ────────────────────────────────────────────────────
+
+type memPane int
 
 const (
-	paneAgents pane = iota
-	paneFacts
-	paneDetail
+	memPaneAgents memPane = iota
+	memPaneFacts
+	memPaneDetail
 )
 
+// ── Main model ────────────────────────────────────────────────────────────────
+
 type tuiModel struct {
-	store     *memory.Store
-	agentList list.Model
-	factList  list.Model
-	detail    viewport.Model
-	active    pane
+	store   *memory.Store
+	dataDir string
+	graph   *kg.Graph
+
+	// layout
+	activeTab tabID
 	width     int
 	height    int
 	err       error
 	status    string
-}
 
-type agentsLoadedMsg struct{ agents []agentItem }
-type factsLoadedMsg struct{ facts []factItem }
-type errMsg struct{ err error }
+	// memory tab
+	memPane   memPane
+	agentList list.Model
+	factList  list.Model
+	detail    viewport.Model
+
+	// sessions tab
+	sessionList list.Model
+
+	// graph tab
+	nodeList    list.Model
+	nodeDetail  viewport.Model
+
+	// stats tab
+	statList list.Model
+}
 
 func (m tuiModel) Init() tea.Cmd {
-	return m.loadAgents()
+	return tea.Batch(m.loadAgents(), m.loadSessions(), m.loadNodes(), m.loadStats())
 }
+
+// ── Loaders ───────────────────────────────────────────────────────────────────
 
 func (m tuiModel) loadAgents() tea.Cmd {
 	return func() tea.Msg {
@@ -120,6 +249,54 @@ func (m tuiModel) loadFacts(agentID string) tea.Cmd {
 	}
 }
 
+func (m tuiModel) loadSessions() tea.Cmd {
+	return func() tea.Msg {
+		sessions, err := harness.ListSessions(m.dataDir)
+		if err != nil {
+			return sessionsLoadedMsg{} // non-fatal
+		}
+		items := make([]sessionItem, len(sessions))
+		for i, s := range sessions {
+			items[i] = sessionItem{s}
+		}
+		return sessionsLoadedMsg{items}
+	}
+}
+
+func (m tuiModel) loadNodes() tea.Cmd {
+	if m.graph == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		nodes, err := m.graph.AllNodes()
+		if err != nil {
+			return nodesLoadedMsg{}
+		}
+		items := make([]nodeItem, len(nodes))
+		for i, n := range nodes {
+			items[i] = nodeItem{n}
+		}
+		return nodesLoadedMsg{items}
+	}
+}
+
+func (m tuiModel) loadStats() tea.Cmd {
+	return func() tea.Msg {
+		agents, err := m.store.ListAgents()
+		if err != nil {
+			return statsLoadedMsg{}
+		}
+		items := make([]statItem, 0, len(agents))
+		for _, a := range agents {
+			st, _ := m.store.Stats(a)
+			items = append(items, statItem{agent: a, st: st})
+		}
+		return statsLoadedMsg{items}
+	}
+}
+
+// ── Update ────────────────────────────────────────────────────────────────────
+
 func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
@@ -128,35 +305,28 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
-		case "tab", "right", "l":
-			if m.active < paneDetail {
-				m.active++
-			}
-		case "shift+tab", "left", "h":
-			if m.active > paneAgents {
-				m.active--
-			}
-		case "enter":
-			if m.active == paneAgents {
-				if sel, ok := m.agentList.SelectedItem().(agentItem); ok {
-					m.active = paneFacts
-					return m, m.loadFacts(sel.id)
-				}
-			} else if m.active == paneFacts {
-				m.active = paneDetail
-				if sel, ok := m.factList.SelectedItem().(factItem); ok {
-					m.detail.SetContent(formatFactDetail(sel.fact))
-				}
-			}
-		case "d":
-			if m.active == paneFacts {
-				if sel, ok := m.factList.SelectedItem().(factItem); ok {
-					if agSel, ok2 := m.agentList.SelectedItem().(agentItem); ok2 {
-						_ = m.store.Delete(agSel.id, sel.fact.ID)
-						m.status = fmt.Sprintf("Deleted fact %s", sel.fact.ID[:8])
-						return m, m.loadFacts(agSel.id)
-					}
-				}
+
+		// Tab switching.
+		case "1":
+			m.activeTab = tabMemory
+		case "2":
+			m.activeTab = tabSessions
+		case "3":
+			m.activeTab = tabGraph
+		case "4":
+			m.activeTab = tabStats
+		case "tab":
+			m.activeTab = (m.activeTab + 1) % tabID(len(tabNames))
+		case "shift+tab":
+			m.activeTab = (m.activeTab + tabID(len(tabNames)) - 1) % tabID(len(tabNames))
+
+		default:
+			// Per-tab key handling.
+			switch m.activeTab {
+			case tabMemory:
+				cmds = append(cmds, m.updateMemoryKey(msg)...)
+			case tabSessions:
+				cmds = append(cmds, m.updateSessionsKey(msg)...)
 			}
 		}
 
@@ -179,81 +349,251 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.factList.SetItems(items)
 
+	case sessionsLoadedMsg:
+		items := make([]list.Item, len(msg.sessions))
+		for i, s := range msg.sessions {
+			items[i] = s
+		}
+		m.sessionList.SetItems(items)
+
+	case nodesLoadedMsg:
+		items := make([]list.Item, len(msg.nodes))
+		for i, n := range msg.nodes {
+			items[i] = n
+		}
+		m.nodeList.SetItems(items)
+
+	case statsLoadedMsg:
+		items := make([]list.Item, len(msg.stats))
+		for i, s := range msg.stats {
+			items[i] = s
+		}
+		m.statList.SetItems(items)
+
 	case errMsg:
 		m.err = msg.err
+
+	case statusMsg:
+		m.status = msg.text
 	}
 
-	// Route key events to active pane.
-	switch m.active {
-	case paneAgents:
+	// Delegate remaining events to active tab's focused widget.
+	switch m.activeTab {
+	case tabMemory:
 		var cmd tea.Cmd
-		m.agentList, cmd = m.agentList.Update(msg)
+		switch m.memPane {
+		case memPaneAgents:
+			m.agentList, cmd = m.agentList.Update(msg)
+		case memPaneFacts:
+			m.factList, cmd = m.factList.Update(msg)
+		case memPaneDetail:
+			m.detail, cmd = m.detail.Update(msg)
+		}
 		cmds = append(cmds, cmd)
-	case paneFacts:
+	case tabSessions:
 		var cmd tea.Cmd
-		m.factList, cmd = m.factList.Update(msg)
+		m.sessionList, cmd = m.sessionList.Update(msg)
 		cmds = append(cmds, cmd)
-	case paneDetail:
+	case tabGraph:
+		var cmd1, cmd2 tea.Cmd
+		m.nodeList, cmd1 = m.nodeList.Update(msg)
+		m.nodeDetail, cmd2 = m.nodeDetail.Update(msg)
+		cmds = append(cmds, cmd1, cmd2)
+	case tabStats:
 		var cmd tea.Cmd
-		m.detail, cmd = m.detail.Update(msg)
+		m.statList, cmd = m.statList.Update(msg)
 		cmds = append(cmds, cmd)
 	}
 
 	return m, tea.Batch(cmds...)
 }
 
+func (m *tuiModel) updateMemoryKey(msg tea.KeyMsg) []tea.Cmd {
+	switch msg.String() {
+	case "right", "l":
+		if m.memPane < memPaneDetail {
+			m.memPane++
+		}
+	case "left", "h":
+		if m.memPane > memPaneAgents {
+			m.memPane--
+		}
+	case "enter":
+		if m.memPane == memPaneAgents {
+			if sel, ok := m.agentList.SelectedItem().(agentItem); ok {
+				m.memPane = memPaneFacts
+				return []tea.Cmd{m.loadFacts(sel.id)}
+			}
+		} else if m.memPane == memPaneFacts {
+			m.memPane = memPaneDetail
+			if sel, ok := m.factList.SelectedItem().(factItem); ok {
+				m.detail.SetContent(formatFactDetail(sel.fact))
+			}
+		}
+	case "d":
+		if m.memPane == memPaneFacts {
+			if sel, ok := m.factList.SelectedItem().(factItem); ok {
+				if agSel, ok2 := m.agentList.SelectedItem().(agentItem); ok2 {
+					_ = m.store.Delete(agSel.id, sel.fact.ID)
+					m.status = "Deleted fact " + sel.fact.ID[:8]
+					return []tea.Cmd{m.loadFacts(agSel.id), m.loadStats()}
+				}
+			}
+		}
+	case "r":
+		return []tea.Cmd{m.loadAgents(), m.loadStats()}
+	}
+	return nil
+}
+
+func (m *tuiModel) updateSessionsKey(msg tea.KeyMsg) []tea.Cmd {
+	switch msg.String() {
+	case "r":
+		return []tea.Cmd{m.loadSessions()}
+	case "k":
+		if sel, ok := m.sessionList.SelectedItem().(sessionItem); ok {
+			if err := harness.KillSession(sel.s.ID, m.dataDir); err != nil {
+				m.status = "kill: " + err.Error()
+			} else {
+				m.status = "Killed " + sel.s.ID[:8]
+				return []tea.Cmd{m.loadSessions()}
+			}
+		}
+	}
+	return nil
+}
+
+// ── View ──────────────────────────────────────────────────────────────────────
+
 func (m tuiModel) View() string {
 	if m.err != nil {
 		return fmt.Sprintf("Error: %v\n\nPress q to quit.", m.err)
 	}
 
-	colW := m.width / 3
+	header := m.renderHeader()
+	body := m.renderBody()
+	footer := m.renderFooter()
 
-	// Agent pane.
-	agentBorder := styleBorder
-	if m.active == paneAgents {
-		agentBorder = agentBorder.BorderForeground(lipgloss.Color("#FF875F"))
-	}
-	agentPane := agentBorder.Width(colW - 2).Height(m.height - 4).Render(m.agentList.View())
-
-	// Fact pane.
-	factBorder := styleBorder
-	if m.active == paneFacts {
-		factBorder = factBorder.BorderForeground(lipgloss.Color("#FF875F"))
-	}
-	factPane := factBorder.Width(colW - 2).Height(m.height - 4).Render(m.factList.View())
-
-	// Detail pane.
-	detailBorder := styleBorder
-	if m.active == paneDetail {
-		detailBorder = detailBorder.BorderForeground(lipgloss.Color("#FF875F"))
-	}
-	detailPane := detailBorder.Width(m.width - colW*2 - 6).Height(m.height - 4).Render(m.detail.View())
-
-	body := lipgloss.JoinHorizontal(lipgloss.Top, agentPane, factPane, detailPane)
-
-	title := styleTitle.Render(" GrayMatter ")
-	help := styleHelp.Render("tab/←→: panes  j/k: navigate  enter: select  d: delete  q: quit")
-	status := ""
-	if m.status != "" {
-		status = styleDim.Render("  " + m.status)
-	}
-
-	return lipgloss.JoinVertical(lipgloss.Left,
-		lipgloss.JoinHorizontal(lipgloss.Center, title, status),
-		body,
-		help,
-	)
+	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
 }
 
-func (m *tuiModel) updateSizes() {
+func (m tuiModel) renderHeader() string {
+	title := styleTitle.Render(" GrayMatter ")
+	tabs := make([]string, len(tabNames))
+	for i, name := range tabNames {
+		if tabID(i) == m.activeTab {
+			tabs[i] = styleTabActive.Render(fmt.Sprintf("[%d] %s", i+1, name))
+		} else {
+			tabs[i] = styleTabInactive.Render(fmt.Sprintf("[%d] %s", i+1, name))
+		}
+	}
+	tabBar := lipgloss.JoinHorizontal(lipgloss.Top, tabs...)
+	statusText := ""
+	if m.status != "" {
+		statusText = styleDimText.Render("  · " + m.status)
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Center, title, " ", tabBar, statusText)
+}
+
+func (m tuiModel) renderBody() string {
+	bodyH := m.height - 3 // header + footer
+	switch m.activeTab {
+	case tabMemory:
+		return m.renderMemory(bodyH)
+	case tabSessions:
+		return m.renderSessions(bodyH)
+	case tabGraph:
+		return m.renderGraph(bodyH)
+	case tabStats:
+		return m.renderStats(bodyH)
+	}
+	return ""
+}
+
+func (m tuiModel) renderFooter() string {
+	var help string
+	switch m.activeTab {
+	case tabMemory:
+		help = "←/→: pane  j/k: navigate  enter: select  d: delete  r: refresh  q: quit"
+	case tabSessions:
+		help = "j/k: navigate  k: kill session  r: refresh  q: quit"
+	case tabGraph:
+		help = "j/k: navigate  q: quit"
+	case tabStats:
+		help = "j/k: navigate  q: quit"
+	}
+	return styleHelp.Render("1-4/tab: switch view  " + help)
+}
+
+func border(active bool) lipgloss.Style {
+	if active {
+		return styleBorderActive
+	}
+	return styleBorderInactive
+}
+
+// ── Memory tab ────────────────────────────────────────────────────────────────
+
+func (m tuiModel) renderMemory(h int) string {
 	colW := m.width / 3
-	listH := m.height - 6
+
+	agentPane := border(m.memPane == memPaneAgents).
+		Width(colW - 2).Height(h - 2).Render(m.agentList.View())
+	factPane := border(m.memPane == memPaneFacts).
+		Width(colW - 2).Height(h - 2).Render(m.factList.View())
+	detailPane := border(m.memPane == memPaneDetail).
+		Width(m.width - colW*2 - 6).Height(h - 2).Render(m.detail.View())
+
+	return lipgloss.JoinHorizontal(lipgloss.Top, agentPane, factPane, detailPane)
+}
+
+// ── Sessions tab ──────────────────────────────────────────────────────────────
+
+func (m tuiModel) renderSessions(h int) string {
+	return styleBorderInactive.Width(m.width - 4).Height(h - 2).Render(m.sessionList.View())
+}
+
+// ── Graph tab ─────────────────────────────────────────────────────────────────
+
+func (m tuiModel) renderGraph(h int) string {
+	if m.graph == nil {
+		return styleBorderInactive.Width(m.width - 4).Height(h - 2).
+			Render(styleDimText.Render("\n  Knowledge graph not initialised.\n  Run `graymatter init` and store some memories first."))
+	}
+	leftW := m.width * 2 / 5
+	leftPane := styleBorderInactive.Width(leftW - 2).Height(h - 2).Render(m.nodeList.View())
+	rightPane := styleBorderInactive.Width(m.width - leftW - 4).Height(h - 2).Render(m.nodeDetail.View())
+	return lipgloss.JoinHorizontal(lipgloss.Top, leftPane, rightPane)
+}
+
+// ── Stats tab ─────────────────────────────────────────────────────────────────
+
+func (m tuiModel) renderStats(h int) string {
+	return styleBorderInactive.Width(m.width - 4).Height(h - 2).Render(m.statList.View())
+}
+
+// ── Size management ───────────────────────────────────────────────────────────
+
+func (m *tuiModel) updateSizes() {
+	bodyH := m.height - 3
+	listH := bodyH - 4
+
+	colW := m.width / 3
 	m.agentList.SetSize(colW-4, listH)
 	m.factList.SetSize(colW-4, listH)
 	m.detail.Width = m.width - colW*2 - 8
 	m.detail.Height = listH
+
+	m.sessionList.SetSize(m.width-6, listH)
+	m.statList.SetSize(m.width-6, listH)
+
+	leftW := m.width * 2 / 5
+	m.nodeList.SetSize(leftW-4, listH)
+	m.nodeDetail.Width = m.width - leftW - 6
+	m.nodeDetail.Height = listH
 }
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 func formatFactDetail(f memory.Fact) string {
 	var sb strings.Builder
@@ -262,10 +602,17 @@ func formatFactDetail(f memory.Fact) string {
 	sb.WriteString(fmt.Sprintf("Created: %s\n", f.CreatedAt.Format("2006-01-02 15:04:05")))
 	sb.WriteString(fmt.Sprintf("Weight:  %.4f\n", f.Weight))
 	sb.WriteString(fmt.Sprintf("Access:  %d times\n", f.AccessCount))
-	sb.WriteString("\n─── Text ─────────────────────────────────\n\n")
+	sb.WriteString("\n─── Text ────────────────────────────\n\n")
 	sb.WriteString(f.Text)
 	sb.WriteString("\n")
 	return sb.String()
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // ── Command wiring ─────────────────────────────────────────────────────────────
@@ -273,7 +620,14 @@ func formatFactDetail(f memory.Fact) string {
 func tuiCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "tui",
-		Short: "Browse and manage memories in a terminal UI",
+		Short: "Browse memories, sessions, KG, and stats in a terminal UI",
+		Long: `Interactive 4-view terminal UI for GrayMatter.
+
+Views (switch with 1-4 or tab/shift+tab):
+  1. Memory   — browse agents, facts, and full fact detail
+  2. Sessions — view and kill managed agent sessions
+  3. Graph    — browse knowledge graph nodes and edges
+  4. Stats    — per-agent memory statistics`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg := graymatter.DefaultConfig()
 			cfg.DataDir = dataDir
@@ -289,26 +643,33 @@ func tuiCmd() *cobra.Command {
 				return fmt.Errorf("store not initialised")
 			}
 
-			agentDelegate := list.NewDefaultDelegate()
-			factDelegate := list.NewDefaultDelegate()
+			// Optional: open KG graph if db is available.
+			var graph *kg.Graph
+			if db := store.DB(); db != nil {
+				if g, err := kg.Open(db); err == nil {
+					graph = g
+				}
+			}
 
-			agentList := list.New(nil, agentDelegate, 30, 20)
-			agentList.Title = "Agents"
-			agentList.SetShowStatusBar(false)
-			agentList.SetFilteringEnabled(true)
-
-			factList := list.New(nil, factDelegate, 40, 20)
-			factList.Title = "Facts"
-			factList.SetShowStatusBar(false)
-			factList.SetFilteringEnabled(true)
-
-			vp := viewport.New(40, 20)
+			newList := func(title string) list.Model {
+				l := list.New(nil, list.NewDefaultDelegate(), 40, 20)
+				l.Title = title
+				l.SetShowStatusBar(false)
+				l.SetFilteringEnabled(true)
+				return l
+			}
 
 			m := tuiModel{
-				store:     store,
-				agentList: agentList,
-				factList:  factList,
-				detail:    vp,
+				store:       store,
+				dataDir:     dataDir,
+				graph:       graph,
+				agentList:   newList("Agents"),
+				factList:    newList("Facts"),
+				sessionList: newList("Sessions"),
+				nodeList:    newList("KG Nodes"),
+				statList:    newList("Statistics"),
+				detail:      viewport.New(40, 20),
+				nodeDetail:  viewport.New(40, 20),
 			}
 
 			p := tea.NewProgram(m, tea.WithAltScreen())

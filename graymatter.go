@@ -53,6 +53,8 @@ func NewWithConfig(cfg Config) (*Memory, error) {
 		OllamaURL:       cfg.OllamaURL,
 		OllamaModel:     cfg.OllamaModel,
 		AnthropicAPIKey: cfg.AnthropicAPIKey,
+		OpenAIAPIKey:    cfg.OpenAIAPIKey,
+		OpenAIModel:     cfg.OpenAIModel,
 	})
 
 	store, err := memory.Open(memory.StoreConfig{

@@ -20,6 +20,7 @@ const (
 	ModeOllama
 	ModeAnthropic
 	ModeKeyword
+	ModeOpenAI
 )
 
 // Provider generates float32 vector embeddings from text.
@@ -39,6 +40,8 @@ type Config struct {
 	OllamaURL       string
 	OllamaModel     string
 	AnthropicAPIKey string
+	OpenAIAPIKey    string
+	OpenAIModel     string // defaults to text-embedding-3-small
 }
 
 // AutoDetect selects the best available Provider given cfg.
@@ -52,11 +55,19 @@ func AutoDetect(cfg Config) Provider {
 			return NewAnthropic(cfg)
 		}
 		return NewKeyword()
+	case ModeOpenAI:
+		if cfg.OpenAIAPIKey != "" {
+			return NewOpenAI(cfg)
+		}
+		return NewKeyword()
 	case ModeKeyword:
 		return NewKeyword()
 	default: // ModeAuto
 		if ollamaReachable(cfg.OllamaURL) {
 			return NewOllama(cfg)
+		}
+		if cfg.OpenAIAPIKey != "" {
+			return NewOpenAI(cfg)
 		}
 		if cfg.AnthropicAPIKey != "" {
 			return NewAnthropic(cfg)
