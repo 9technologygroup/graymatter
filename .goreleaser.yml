@@ -5,7 +5,6 @@ project_name: graymatter
 before:
   hooks:
     - go mod tidy
-    - go generate ./...
 
 builds:
   - id: graymatter
@@ -38,7 +37,6 @@ archives:
     files:
       - README.md
       - LICENSE
-      - .mcp.json
 
 checksum:
   name_template: "checksums.txt"
@@ -57,7 +55,7 @@ changelog:
 
 release:
   github:
-    owner: graymatter-ai
+    owner: angelnicolasc
     name: graymatter
   draft: false
   prerelease: auto
