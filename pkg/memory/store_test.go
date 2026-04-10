@@ -11,6 +11,16 @@ import (
 	"github.com/angelnicolasc/graymatter/pkg/embedding"
 )
 
+// goodProvider returns a fixed 4-dimensional embedding — enough to exercise
+// addToVector, chromemVectorStore.AddDocument, and chromemVectorStore.Query.
+type goodProvider struct{}
+
+func (g *goodProvider) Embed(_ context.Context, _ string) ([]float32, error) {
+	return []float32{0.1, 0.2, 0.3, 0.4}, nil
+}
+func (g *goodProvider) Dimensions() int { return 4 }
+func (g *goodProvider) Name() string    { return "good-provider" }
+
 // errProvider is an embedding.Provider that always returns an error.
 type errProvider struct{}
 
@@ -255,6 +265,81 @@ func TestReconcileVectors_IsIdempotent(t *testing.T) {
 	}
 	if len(facts) != 1 {
 		t.Errorf("expected 1 fact after reopen, got %d", len(facts))
+	}
+}
+
+// TestDB_Getter verifies DB() returns the underlying bolt handle.
+func TestDB_Getter(t *testing.T) {
+	s, cleanup := openTestStore(t)
+	defer cleanup()
+	if s.DB() == nil {
+		t.Error("DB() returned nil")
+	}
+}
+
+// TestSetKG_NilArgs verifies SetKG accepts nil arguments without panicking.
+func TestSetKG_NilArgs(t *testing.T) {
+	s, cleanup := openTestStore(t)
+	defer cleanup()
+	s.SetKG(nil, nil) // must not panic
+}
+
+// TestMarshalJSON_RoundTrip covers the internal marshalJSON helper.
+func TestMarshalJSON_RoundTrip(t *testing.T) {
+	type simple struct{ X int }
+	b, err := marshalJSON(simple{X: 42})
+	if err != nil {
+		t.Fatalf("marshalJSON: %v", err)
+	}
+	if string(b) != `{"X":42}` {
+		t.Errorf("got %s, want {\"X\":42}", b)
+	}
+}
+
+// TestPut_WithEmbedder covers addToVector and chromemVectorStore.AddDocument
+// by using a fixed-vector provider that returns a real embedding.
+func TestPut_WithEmbedder(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(StoreConfig{DataDir: dir, Embedder: &goodProvider{}, DecayHalfLife: 720 * time.Hour})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	ctx := context.Background()
+	if err := s.Put(ctx, "vec-agent", "vector fact"); err != nil {
+		t.Fatalf("Put with goodProvider: %v", err)
+	}
+	facts, err := s.List("vec-agent")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(facts) != 1 {
+		t.Fatalf("expected 1 fact, got %d", len(facts))
+	}
+	if len(facts[0].Embedding) == 0 {
+		t.Error("expected embedding to be stored")
+	}
+}
+
+// TestRecall_WithEmbedder covers vectorSearch → chromemVectorStore.Query.
+func TestRecall_WithEmbedder(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(StoreConfig{DataDir: dir, Embedder: &goodProvider{}, DecayHalfLife: 720 * time.Hour})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	ctx := context.Background()
+	_ = s.Put(ctx, "vec-recall-agent", "vector recall fact")
+
+	results, err := s.Recall(ctx, "vec-recall-agent", "vector recall", 5)
+	if err != nil {
+		t.Fatalf("Recall with embedder: %v", err)
+	}
+	if len(results) == 0 {
+		t.Error("expected at least one recall result")
 	}
 }
 

@@ -46,8 +46,8 @@ jobs:
           TOTAL=$(go tool cover -func=coverage-core.out \
             | grep '^total:' | awk '{print $3}' | tr -d '%')
           echo "Core coverage: ${TOTAL}%"
-          if awk "BEGIN{exit !($TOTAL < 68)}"; then
-            echo "::error::Core coverage ${TOTAL}% is below the 68% threshold."
+          if awk "BEGIN{exit !($TOTAL < 70)}"; then
+            echo "::error::Core coverage ${TOTAL}% is below the 70% threshold."
             exit 1
           fi
 
