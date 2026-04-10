@@ -8,21 +8,24 @@ import (
 	"time"
 )
 
+// Recall also fires the OnRecall observability hook if configured.
+
 // Recall performs hybrid retrieval for agentID given a query string.
 // It fuses three signals via Reciprocal Rank Fusion (RRF):
-//  1. Vector similarity (cosine, via chromem-go) — when embeddings available
+//  1. Vector similarity (cosine, pluggable VectorStore) — when embeddings available
 //  2. Keyword relevance (TF-IDF approximation over bbolt facts)
 //  3. Recency score (exponential decay from CreatedAt)
 //
 // Returns the top-k fact texts, ready to inject into a system prompt.
 func (s *Store) Recall(ctx context.Context, agentID, query string, topK int) ([]string, error) {
+	start := time.Now()
 	facts, err := s.List(agentID)
 	if err != nil || len(facts) == 0 {
 		return nil, err
 	}
 
 	// --- Signal 1: vector similarity ---
-	vectorRank := make(map[string]int) // factID → rank (1-based)
+	vectorRank := make(map[string]int, topK*2) // factID → rank (1-based)
 	vecResults, _ := s.vectorSearch(ctx, agentID, query, topK*2)
 	for i, r := range vecResults {
 		vectorRank[r.ID] = i + 1
@@ -147,6 +150,9 @@ func (s *Store) Recall(ctx context.Context, agentID, query string, topK int) ([]
 		}
 	}
 
+	if s.cfg.OnRecall != nil {
+		s.cfg.OnRecall(agentID, query, len(result), time.Since(start))
+	}
 	return result, nil
 }
 
@@ -192,22 +198,8 @@ func keywordScore(query string, facts []Fact) map[string]float64 {
 	return scores
 }
 
-// tokenize splits text into lowercase tokens, removing stop words.
-func tokenize(text string) []string {
-	stop := stopWords()
-	words := strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
-		return !('a' <= r && r <= 'z') && !('0' <= r && r <= '9')
-	})
-	result := make([]string, 0, len(words))
-	for _, w := range words {
-		if len(w) > 1 && !stop[w] {
-			result = append(result, w)
-		}
-	}
-	return result
-}
-
-func stopWords() map[string]bool {
+// stopWordSet is allocated once at package init time and shared across all calls.
+var stopWordSet = func() map[string]bool {
 	words := []string{
 		"a", "an", "the", "is", "it", "in", "on", "at", "to", "for",
 		"of", "and", "or", "but", "not", "with", "this", "that", "was",
@@ -219,4 +211,18 @@ func stopWords() map[string]bool {
 		m[w] = true
 	}
 	return m
+}()
+
+// tokenize splits text into lowercase tokens, removing stop words.
+func tokenize(text string) []string {
+	words := strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
+		return !('a' <= r && r <= 'z') && !('0' <= r && r <= '9')
+	})
+	result := make([]string, 0, len(words))
+	for _, w := range words {
+		if len(w) > 1 && !stopWordSet[w] {
+			result = append(result, w)
+		}
+	}
+	return result
 }

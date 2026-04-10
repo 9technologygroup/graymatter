@@ -10,7 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/angelnicolasc/graymatter/pkg/server"
+	"github.com/angelnicolasc/graymatter/cmd/graymatter/internal/server"
 )
 
 func serverCmd() *cobra.Command {

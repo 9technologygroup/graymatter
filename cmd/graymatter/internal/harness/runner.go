@@ -18,7 +18,7 @@ import (
 	bolt "go.etcd.io/bbolt"
 
 	graymatter "github.com/angelnicolasc/graymatter"
-	"github.com/angelnicolasc/graymatter/pkg/session"
+	"github.com/angelnicolasc/graymatter/cmd/graymatter/internal/session"
 )
 
 var bucketHarness = []byte("harness_sessions")

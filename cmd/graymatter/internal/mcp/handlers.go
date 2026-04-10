@@ -10,7 +10,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	bolt "go.etcd.io/bbolt"
 
-	"github.com/angelnicolasc/graymatter/pkg/session"
+	"github.com/angelnicolasc/graymatter/cmd/graymatter/internal/session"
 )
 
 var bucketAudit = []byte("kg_audit")

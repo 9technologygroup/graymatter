@@ -7,7 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/angelnicolasc/graymatter/pkg/plugin"
+	"github.com/angelnicolasc/graymatter/cmd/graymatter/internal/plugin"
 )
 
 func pluginCmd() *cobra.Command {

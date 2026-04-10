@@ -9,7 +9,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 
-	"github.com/angelnicolasc/graymatter/pkg/session"
+	"github.com/angelnicolasc/graymatter/cmd/graymatter/internal/session"
 	bolt "go.etcd.io/bbolt"
 )
 

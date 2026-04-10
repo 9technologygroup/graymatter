@@ -16,7 +16,6 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -38,20 +37,38 @@ const (
 )
 
 // Server wraps an HTTP server backed by a GrayMatter memory store.
+// The store is opened once at construction time and shared across all
+// requests; call Shutdown to close it.
 type Server struct {
 	httpSrv *http.Server
+	store   *memory.Store // nil if Open failed; handlers return 503 in that case
+	metrics *serverMetrics
 	dataDir string
 	addr    string
 	logger  *slog.Logger
 }
 
-// New creates a Server that will open the memory store at dataDir and listen
-// on addr (e.g. ":8080").
+// New creates a Server that opens the memory store at dataDir and will listen
+// on addr (e.g. ":8080"). The store is opened once and reused for all requests.
 func New(addr, dataDir string, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
+
+	emb := embedding.AutoDetect(embedding.Config{Mode: embedding.ModeKeyword})
+	store, err := memory.Open(memory.StoreConfig{
+		DataDir:  dataDir,
+		Embedder: emb,
+	})
+	if err != nil {
+		logger.Error("graymatter server: failed to open store", "error", err)
+		// store remains nil; storeReady() will reject all data requests with 503.
+	}
+
+	m := newServerMetrics("graymatter_server")
 	s := &Server{
+		store:   store,
+		metrics: m,
 		dataDir: dataDir,
 		addr:    addr,
 		logger:  logger,
@@ -64,10 +81,11 @@ func New(addr, dataDir string, logger *slog.Logger) *Server {
 	mux.HandleFunc("POST /consolidate", s.handleConsolidate)
 	mux.HandleFunc("GET /facts", s.handleFacts)
 	mux.HandleFunc("DELETE /forget", s.handleForget)
+	mux.Handle("GET /metrics", metricsHandler())
 
 	s.httpSrv = &http.Server{
 		Addr:         addr,
-		Handler:      loggingMiddleware(logger, mux),
+		Handler:      s.loggingMiddleware(mux),
 		ReadTimeout:  readTimeout,
 		WriteTimeout: writeTimeout,
 		IdleTimeout:  idleTimeout,
@@ -91,11 +109,26 @@ func (s *Server) Serve(l net.Listener) error {
 	return s.httpSrv.Serve(l)
 }
 
-// Shutdown gracefully stops the server.
+// Shutdown gracefully stops the HTTP server and closes the underlying store.
 func (s *Server) Shutdown(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, shutdownGrace)
+	shutCtx, cancel := context.WithTimeout(ctx, shutdownGrace)
 	defer cancel()
-	return s.httpSrv.Shutdown(ctx)
+	httpErr := s.httpSrv.Shutdown(shutCtx)
+	if s.store != nil {
+		if storeErr := s.store.Close(); storeErr != nil && httpErr == nil {
+			return storeErr
+		}
+	}
+	return httpErr
+}
+
+// storeReady returns false and writes a 503 if the store failed to open.
+func (s *Server) storeReady(w http.ResponseWriter) bool {
+	if s.store == nil {
+		writeError(w, http.StatusServiceUnavailable, "store unavailable")
+		return false
+	}
+	return true
 }
 
 // --- handlers ---
@@ -118,18 +151,14 @@ func (s *Server) handleRemember(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "agent and text are required")
 		return
 	}
-
-	store, err := s.openStore()
-	if err != nil {
+	if !s.storeReady(w) {
+		return
+	}
+	if err := s.store.Put(r.Context(), req.Agent, req.Text); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	defer store.Close()
-
-	if err := store.Put(r.Context(), req.Agent, req.Text); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
+	s.metrics.recordFact(req.Agent)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -146,19 +175,15 @@ func (s *Server) handleRecall(w http.ResponseWriter, r *http.Request) {
 			topK = v
 		}
 	}
-
-	store, err := s.openStore()
+	if !s.storeReady(w) {
+		return
+	}
+	results, err := s.store.Recall(r.Context(), agent, query, topK)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	defer store.Close()
-
-	results, err := store.Recall(r.Context(), agent, query, topK)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
+	s.metrics.recordRecall(agent)
 	writeJSON(w, http.StatusOK, map[string]any{"results": results})
 }
 
@@ -175,22 +200,16 @@ func (s *Server) handleConsolidate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "agent is required")
 		return
 	}
-
 	apiKey := os.Getenv("ANTHROPIC_API_KEY")
 	if apiKey == "" {
 		writeError(w, http.StatusServiceUnavailable, "ANTHROPIC_API_KEY not set; consolidate requires LLM access")
 		return
 	}
-
-	store, err := s.openStore()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if !s.storeReady(w) {
 		return
 	}
-	defer store.Close()
-
 	cfg := &restConsolidateCfg{apiKey: apiKey}
-	if err := store.Consolidate(r.Context(), req.Agent, cfg); err != nil {
+	if err := s.store.Consolidate(r.Context(), req.Agent, cfg); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -209,15 +228,10 @@ func (s *Server) handleFacts(w http.ResponseWriter, r *http.Request) {
 			limit = v
 		}
 	}
-
-	store, err := s.openStore()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if !s.storeReady(w) {
 		return
 	}
-	defer store.Close()
-
-	facts, err := store.List(agent)
+	facts, err := s.store.List(agent)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -255,16 +269,11 @@ func (s *Server) handleForget(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "agent and query are required")
 		return
 	}
-
-	store, err := s.openStore()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if !s.storeReady(w) {
 		return
 	}
-	defer store.Close()
-
 	// Recall 1 result to find the best match, then delete its fact ID.
-	results, err := store.Recall(r.Context(), req.Agent, req.Query, 1)
+	results, err := s.store.Recall(r.Context(), req.Agent, req.Query, 1)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -275,14 +284,14 @@ func (s *Server) handleForget(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Find the fact ID by matching the recalled text.
-	facts, err := store.List(req.Agent)
+	facts, err := s.store.List(req.Agent)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	for _, f := range facts {
 		if f.Text == results[0] {
-			if err := store.Delete(req.Agent, f.ID); err != nil {
+			if err := s.store.Delete(req.Agent, f.ID); err != nil {
 				writeError(w, http.StatusInternalServerError, err.Error())
 				return
 			}
@@ -293,20 +302,6 @@ func (s *Server) handleForget(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "not_found"})
 }
 
-// --- store helpers ---
-
-func (s *Server) openStore() (*memory.Store, error) {
-	emb := embedding.AutoDetect(embedding.Config{Mode: embedding.ModeKeyword})
-	store, err := memory.Open(memory.StoreConfig{
-		DataDir:  s.dataDir,
-		Embedder: emb,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("open store: %w", err)
-	}
-	return store, nil
-}
-
 // restConsolidateCfg is a minimal ConsolidateConfig used by the REST layer.
 type restConsolidateCfg struct {
 	apiKey string
@@ -314,8 +309,8 @@ type restConsolidateCfg struct {
 
 func (c *restConsolidateCfg) GetAnthropicAPIKey() string     { return c.apiKey }
 func (c *restConsolidateCfg) GetConsolidateLLM() string      { return "anthropic" }
-func (c *restConsolidateCfg) GetConsolidateModel() string     { return "claude-haiku-4-5-20251001" }
-func (c *restConsolidateCfg) GetConsolidateThreshold() int    { return 20 }
+func (c *restConsolidateCfg) GetConsolidateModel() string    { return "claude-haiku-4-5-20251001" }
+func (c *restConsolidateCfg) GetConsolidateThreshold() int   { return 20 }
 func (c *restConsolidateCfg) GetDecayHalfLife() time.Duration { return 168 * time.Hour } // 1 week
 
 // --- HTTP utilities ---
@@ -323,7 +318,7 @@ func (c *restConsolidateCfg) GetDecayHalfLife() time.Duration { return 168 * tim
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+	_ = json.NewEncoder(w).Encode(v) // headers already sent; encoding errors are unrecoverable
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {
@@ -338,26 +333,17 @@ func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
 	return true
 }
 
-func loggingMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
+func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		rw := &responseWriter{ResponseWriter: w, status: http.StatusOK}
+		rw := newInstrumentedRW(w)
 		next.ServeHTTP(rw, r)
-		logger.Info("http",
+		elapsed := rw.elapsed()
+		s.logger.Info("http",
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", rw.status,
-			"duration", time.Since(start).String(),
+			"duration", elapsed.String(),
 		)
+		s.metrics.recordRequest(r.Method, r.URL.Path, rw.status, elapsed)
 	})
-}
-
-type responseWriter struct {
-	http.ResponseWriter
-	status int
-}
-
-func (rw *responseWriter) WriteHeader(code int) {
-	rw.status = code
-	rw.ResponseWriter.WriteHeader(code)
 }

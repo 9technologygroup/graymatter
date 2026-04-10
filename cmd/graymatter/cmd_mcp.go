@@ -7,7 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	graymatter "github.com/angelnicolasc/graymatter"
-	gmcp "github.com/angelnicolasc/graymatter/pkg/mcp"
+	gmcp "github.com/angelnicolasc/graymatter/cmd/graymatter/internal/mcp"
 )
 
 func mcpCmd() *cobra.Command {

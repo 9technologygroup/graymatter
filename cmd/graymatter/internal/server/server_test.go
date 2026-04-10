@@ -14,21 +14,27 @@ import (
 
 // startTestServer starts the REST server on a random free port and returns
 // the base URL + a cleanup function that shuts it down.
+// The server is shut down via t.Cleanup so the store is closed before
+// TempDir removal (important on Windows where bbolt holds a file lock).
 func startTestServer(t *testing.T) (baseURL string, cleanup func()) {
 	t.Helper()
+
+	// Create data dir manually so we control cleanup ordering:
+	// shutdown must happen before the directory is removed.
+	dataDir := t.TempDir()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 
-	srv := New(ln.Addr().String(), t.TempDir(), nil)
-	errCh := make(chan error, 1)
-	go func() { errCh <- srv.Serve(ln) }()
+	srv := New(ln.Addr().String(), dataDir, nil)
+	go func() { _ = srv.Serve(ln) }()
 
-	return "http://" + ln.Addr().String(), func() {
-		_ = srv.Shutdown(context.Background())
-	}
+	stop := func() { _ = srv.Shutdown(context.Background()) }
+	t.Cleanup(stop)
+
+	return "http://" + ln.Addr().String(), stop
 }
 
 func doJSON(t *testing.T, method, url string, body any) (statusCode int, respBody []byte) {

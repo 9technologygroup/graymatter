@@ -35,7 +35,7 @@ func NewOllama(cfg Config) *OllamaProvider {
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
-		dims: 768, // nomic-embed-text default; updated on first call
+		dims: 768, // nomic-embed-text default; updated on first successful call
 	}
 }
 
@@ -54,35 +54,55 @@ func (o *OllamaProvider) Embed(ctx context.Context, text string) ([]float32, err
 		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.baseURL+"/api/embeddings", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := o.httpClient.Do(req)
-	if err != nil {
-		// Retry once.
-		resp, err = o.httpClient.Do(req)
-		if err != nil {
-			return nil, fmt.Errorf("ollama embed: %w", err)
+	// Retry up to 3 attempts with exponential backoff.
+	// Each attempt rebuilds the request because the body reader is consumed.
+	backoff := 500 * time.Millisecond
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(backoff):
+				backoff *= 2
+			}
 		}
-	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		data, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("ollama embed: status %d: %s", resp.StatusCode, string(data))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+			o.baseURL+"/api/embeddings", bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := o.httpClient.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			data, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			lastErr = fmt.Errorf("ollama embed: status %d: %s", resp.StatusCode, string(data))
+			continue
+		}
+
+		var result ollamaEmbedResponse
+		decErr := json.NewDecoder(resp.Body).Decode(&result)
+		resp.Body.Close()
+		if decErr != nil {
+			lastErr = fmt.Errorf("ollama embed decode: %w", decErr)
+			continue
+		}
+
+		if len(result.Embedding) > 0 {
+			o.dims = len(result.Embedding)
+		}
+		return result.Embedding, nil
 	}
 
-	var result ollamaEmbedResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("ollama embed decode: %w", err)
-	}
-	if len(result.Embedding) > 0 {
-		o.dims = len(result.Embedding)
-	}
-	return result.Embedding, nil
+	return nil, fmt.Errorf("ollama embed: %w", lastErr)
 }
 
 func (o *OllamaProvider) Dimensions() int { return o.dims }

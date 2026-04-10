@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"path/filepath"
 	"sync"
 	"time"
 
-	chromem "github.com/philippgille/chromem-go"
 	bolt "go.etcd.io/bbolt"
 
 	"github.com/angelnicolasc/graymatter/pkg/embedding"
@@ -35,6 +35,11 @@ type StoreConfig struct {
 	Embedder      embedding.Provider
 	DecayHalfLife time.Duration
 
+	// VectorBackend overrides the default chromem-go vector store.
+	// If nil, a persistent chromem-go instance is created under DataDir/vectors.
+	// Use this to plug in Qdrant, Weaviate, pgvector, or any VectorStore impl.
+	VectorBackend VectorStore
+
 	// MaxAsyncConsolidations bounds concurrent background consolidations.
 	// 0 is normalised to 2 by Open().
 	MaxAsyncConsolidations int
@@ -42,6 +47,17 @@ type StoreConfig struct {
 	// OnConsolidateError is called when an async consolidation goroutine errors.
 	// If nil, errors are discarded. Must be safe for concurrent use.
 	OnConsolidateError func(agentID string, err error)
+
+	// OnRecall, if non-nil, is called after each Recall with timing and count.
+	OnRecall func(agentID, query string, resultCount int, duration time.Duration)
+
+	// OnPut, if non-nil, is called after each successful Put.
+	OnPut func(agentID, factID string, duration time.Duration)
+
+	// Logger receives structured log events. Uses log.Default() if nil.
+	Logger interface {
+		Printf(format string, v ...any)
+	}
 }
 
 // GraphAccessor is a narrow interface that pkg/memory uses to interact with
@@ -60,16 +76,15 @@ type EntityExtractorAccessor interface {
 }
 
 // Store is the central storage layer. It combines bbolt for durable
-// structured storage with chromem-go for in-process vector similarity search.
+// structured storage with a pluggable VectorStore for similarity search.
 // All public methods are safe for concurrent use.
 type Store struct {
-	db       *bolt.DB
-	vdb      *chromem.DB
+	db      *bolt.DB
+	vectors VectorStore
 	embedder embedding.Provider
 	cfg      StoreConfig
 
-	mu         sync.RWMutex
-	collection map[string]*chromem.Collection // agentID → collection
+	mu sync.RWMutex
 
 	// graph and extractor are set via SetKG after Open().
 	// They are optional; Consolidate and Recall work without them.
@@ -110,20 +125,23 @@ func Open(cfg StoreConfig) (*Store, error) {
 		return nil, fmt.Errorf("init buckets: %w", err)
 	}
 
-	vecDir := filepath.Join(cfg.DataDir, "vectors")
-	vdb, err := chromem.NewPersistentDB(vecDir, false)
-	if err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("open chromem: %w", err)
+	// Use the caller-supplied vector backend, or default to chromem-go.
+	vectors := cfg.VectorBackend
+	if vectors == nil {
+		v, err := newChromemVectorStore(cfg.DataDir)
+		if err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("open vector store: %w", err)
+		}
+		vectors = v
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Store{
 		db:             db,
-		vdb:            vdb,
+		vectors:        vectors,
 		embedder:       cfg.Embedder,
 		cfg:            cfg,
-		collection:     make(map[string]*chromem.Collection),
 		shutdownCtx:    ctx,
 		shutdownCancel: cancel,
 		sema:           make(chan struct{}, cfg.MaxAsyncConsolidations),
@@ -131,6 +149,11 @@ func Open(cfg StoreConfig) (*Store, error) {
 
 	// Hydrate known agent IDs so collections are ready.
 	_ = s.loadAgents()
+
+	// Validate embedding dimensions against the stored value; warn on mismatch.
+	if cfg.Embedder != nil {
+		s.checkEmbedDimensions(cfg.Embedder)
+	}
 
 	// Re-index any facts that are in bbolt but missing from the vector store
 	// (e.g. after a crash between a bbolt commit and the vector write).
@@ -141,6 +164,8 @@ func Open(cfg StoreConfig) (*Store, error) {
 
 // Put stores a new observation for agentID.
 func (s *Store) Put(ctx context.Context, agentID, text string) error {
+	start := time.Now()
+
 	var emb []float32
 	if s.embedder != nil {
 		var err error
@@ -174,12 +199,16 @@ func (s *Store) Put(ctx context.Context, agentID, text string) error {
 
 	// Add to vector index if we have an embedding.
 	if len(emb) > 0 {
+		s.recordEmbedDimensions(len(emb))
 		if err := s.addToVector(ctx, agentID, f); err != nil {
 			// Non-fatal: bbolt write already succeeded.
 			_ = err
 		}
 	}
 
+	if s.cfg.OnPut != nil {
+		s.cfg.OnPut(agentID, f.ID, time.Since(start))
+	}
 	return nil
 }
 
@@ -279,6 +308,7 @@ func (s *Store) UpdateFact(agentID string, f Fact) error {
 func (s *Store) Close() error {
 	s.shutdownCancel()
 	s.wg.Wait()
+	_ = s.vectors.Close()
 	return s.db.Close()
 }
 
@@ -349,16 +379,16 @@ func (s *Store) loadAgents() error {
 		return err
 	}
 	for _, id := range agents {
-		s.ensureCollection(id)
+		_ = s.vectors.EnsureCollection(id)
 	}
 	return nil
 }
 
 // reconcileVectors ensures every bbolt fact with an embedding is present in
-// the chromem-go vector index. Called once at Open() to repair divergences
-// caused by crashes between the bbolt write and the vector write.
+// the vector store. Called once at Open() to repair divergences caused by crashes
+// between the bbolt write and the vector write.
 // Best-effort: individual errors are silently ignored (bbolt is source of truth).
-// chromem-go AddDocument overwrites on duplicate ID, so this is idempotent.
+// AddDocument is idempotent (overwrites on duplicate ID).
 func (s *Store) reconcileVectors() {
 	agents, err := s.ListAgents()
 	if err != nil {
@@ -379,51 +409,68 @@ func (s *Store) reconcileVectors() {
 	}
 }
 
-func (s *Store) ensureCollection(agentID string) *chromem.Collection {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if c, ok := s.collection[agentID]; ok {
-		return c
+// checkEmbedDimensions reads the stored embedding dimension from the meta bucket
+// and warns if the current provider's dimension differs. On first use it records
+// the current dimension so future opens can detect provider switches.
+func (s *Store) checkEmbedDimensions(emb embedding.Provider) {
+	const metaKeyDims = "embed_dims"
+	currentDims := emb.Dimensions()
+	if currentDims <= 0 {
+		return // provider doesn't know its dims yet (e.g. Ollama before first call)
 	}
-	c, _ := s.vdb.GetOrCreateCollection(agentID, nil, nil)
-	s.collection[agentID] = c
-	return c
+
+	_ = s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketMeta)
+		stored := b.Get([]byte(metaKeyDims))
+		if stored == nil {
+			val, _ := json.Marshal(currentDims)
+			return b.Put([]byte(metaKeyDims), val)
+		}
+		var storedDims int
+		if err := json.Unmarshal(stored, &storedDims); err != nil {
+			return nil
+		}
+		if storedDims != currentDims {
+			log.Printf("graymatter: WARNING embedding dimension mismatch: stored=%d current=%d (provider=%s). "+
+				"Vector search results may be inaccurate. Consider re-indexing your data.",
+				storedDims, currentDims, emb.Name())
+		}
+		return nil
+	})
+}
+
+// recordEmbedDimensions writes the embedding dimension to meta if not already set.
+// Called the first time a fact with an embedding is persisted.
+func (s *Store) recordEmbedDimensions(dims int) {
+	const metaKeyDims = "embed_dims"
+	_ = s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketMeta)
+		if b.Get([]byte(metaKeyDims)) != nil {
+			return nil // already recorded
+		}
+		val, _ := json.Marshal(dims)
+		return b.Put([]byte(metaKeyDims), val)
+	})
 }
 
 func (s *Store) addToVector(ctx context.Context, agentID string, f Fact) error {
-	c := s.ensureCollection(agentID)
 	metadata := map[string]string{
 		"agent_id":   agentID,
 		"created_at": f.CreatedAt.Format(time.RFC3339),
 	}
-	doc := chromem.Document{
-		ID:        f.ID,
-		Content:   f.Text,
-		Metadata:  metadata,
-		Embedding: f.Embedding,
-	}
-	return c.AddDocument(ctx, doc)
+	return s.vectors.AddDocument(ctx, agentID, f.ID, f.Text, f.Embedding, metadata)
 }
 
 // vectorSearch returns at most n results from the vector index.
-func (s *Store) vectorSearch(ctx context.Context, agentID, query string, n int) ([]chromem.Result, error) {
-	c := s.ensureCollection(agentID)
-	if c == nil {
+func (s *Store) vectorSearch(ctx context.Context, agentID, query string, n int) ([]VectorResult, error) {
+	if s.embedder == nil {
 		return nil, nil
 	}
-	// Generate query embedding.
-	var qEmb []float32
-	if s.embedder != nil {
-		var err error
-		qEmb, err = s.embedder.Embed(ctx, query)
-		if err != nil || len(qEmb) == 0 {
-			return nil, nil
-		}
-	}
-	if len(qEmb) == 0 {
+	qEmb, err := s.embedder.Embed(ctx, query)
+	if err != nil || len(qEmb) == 0 {
 		return nil, nil
 	}
-	return c.QueryEmbedding(ctx, qEmb, n, nil, nil)
+	return s.vectors.Query(ctx, agentID, qEmb, n)
 }
 
 // marshalJSON helper for meta bucket.

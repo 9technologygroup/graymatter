@@ -12,7 +12,7 @@ import (
 	"github.com/oklog/ulid/v2"
 	"github.com/spf13/cobra"
 
-	"github.com/angelnicolasc/graymatter/pkg/harness"
+	"github.com/angelnicolasc/graymatter/cmd/graymatter/internal/harness"
 )
 
 func runCmd() *cobra.Command {

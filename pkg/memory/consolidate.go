@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -75,11 +76,17 @@ func (s *Store) Consolidate(ctx context.Context, agentID string, cfg Consolidate
 	}
 	lambda := math.Log(2) / halfLife.Hours()
 
-	// Step 1: decay all facts.
+	// Step 1: decay all facts. Accumulate errors rather than silently dropping.
+	var decayErrs []error
 	for i := range facts {
 		hours := time.Since(facts[i].AccessedAt).Hours()
 		facts[i].Weight *= math.Exp(-lambda * hours)
-		_ = s.UpdateFact(agentID, facts[i])
+		if err := s.UpdateFact(agentID, facts[i]); err != nil {
+			decayErrs = append(decayErrs, fmt.Errorf("decay fact %s: %w", facts[i].ID, err))
+		}
+	}
+	if len(decayErrs) > 0 {
+		return errors.Join(decayErrs...)
 	}
 
 	// Step 2: LLM summarisation when enabled and threshold exceeded.
@@ -89,10 +96,13 @@ func (s *Store) Consolidate(ctx context.Context, agentID string, cfg Consolidate
 
 		summary, err := summariseFacts(ctx, batch, cfg)
 		if err == nil && summary != "" {
-			for _, f := range batch {
-				_ = s.Delete(agentID, f.ID)
+			// Only delete the batch if Put of the summary succeeds — never lose data.
+			if putErr := s.Put(ctx, agentID, summary); putErr == nil {
+				for _, f := range batch {
+					// Best-effort deletes; facts will be pruned by weight decay if delete fails.
+					_ = s.Delete(agentID, f.ID)
+				}
 			}
-			_ = s.Put(ctx, agentID, summary)
 		}
 	}
 
@@ -103,6 +113,7 @@ func (s *Store) Consolidate(ctx context.Context, agentID string, cfg Consolidate
 	}
 	for _, f := range facts {
 		if f.Weight < 0.01 {
+			// Best-effort; weight-zero facts will simply be ignored in future recalls.
 			_ = s.Delete(agentID, f.ID)
 		}
 	}
@@ -120,7 +131,11 @@ func (s *Store) Consolidate(ctx context.Context, agentID string, cfg Consolidate
 				continue
 			}
 			for _, id := range ids {
-				_ = graph.UpsertNode(id, id, "fact")
+				if upsertErr := graph.UpsertNode(id, id, "fact"); upsertErr != nil {
+					if s.cfg.OnConsolidateError != nil {
+						s.cfg.OnConsolidateError(agentID, fmt.Errorf("upsert node %s: %w", id, upsertErr))
+					}
+				}
 			}
 		}
 	}

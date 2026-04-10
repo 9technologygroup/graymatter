@@ -10,7 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	graymatter "github.com/angelnicolasc/graymatter"
-	"github.com/angelnicolasc/graymatter/pkg/session"
+	"github.com/angelnicolasc/graymatter/cmd/graymatter/internal/session"
 )
 
 func checkpointCmd() *cobra.Command {

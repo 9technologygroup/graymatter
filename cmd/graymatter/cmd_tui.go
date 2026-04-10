@@ -12,8 +12,8 @@ import (
 	"github.com/spf13/cobra"
 
 	graymatter "github.com/angelnicolasc/graymatter"
-	"github.com/angelnicolasc/graymatter/pkg/harness"
-	"github.com/angelnicolasc/graymatter/pkg/kg"
+	"github.com/angelnicolasc/graymatter/cmd/graymatter/internal/harness"
+	"github.com/angelnicolasc/graymatter/cmd/graymatter/internal/kg"
 	"github.com/angelnicolasc/graymatter/pkg/memory"
 )
 

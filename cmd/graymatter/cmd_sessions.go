@@ -10,7 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/angelnicolasc/graymatter/pkg/harness"
+	"github.com/angelnicolasc/graymatter/cmd/graymatter/internal/harness"
 )
 
 func sessionsCmd() *cobra.Command {

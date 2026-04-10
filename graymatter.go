@@ -58,11 +58,11 @@ func NewWithConfig(cfg Config) (*Memory, error) {
 	})
 
 	store, err := memory.Open(memory.StoreConfig{
-		DataDir:               cfg.DataDir,
-		Embedder:              embedder,
-		DecayHalfLife:         cfg.DecayHalfLife,
+		DataDir:                cfg.DataDir,
+		Embedder:               embedder,
+		DecayHalfLife:          cfg.DecayHalfLife,
 		MaxAsyncConsolidations: cfg.MaxAsyncConsolidations,
-		OnConsolidateError:    cfg.OnConsolidateError,
+		OnConsolidateError:     cfg.OnConsolidateError,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("graymatter: open store: %w", err)
@@ -80,10 +80,16 @@ func NewWithConfig(cfg Config) (*Memory, error) {
 //
 //	mem.Remember("sales-closer", "Maria didn't reply Wednesday. Third touchpoint due Friday.")
 func (m *Memory) Remember(agentID, text string) error {
+	return m.RememberCtx(context.Background(), agentID, text)
+}
+
+// RememberCtx is the context-aware variant of Remember.
+// Use this when you need timeout control or tracing propagation.
+func (m *Memory) RememberCtx(ctx context.Context, agentID, text string) error {
 	if m.store == nil {
 		return nil // no-op mode
 	}
-	if err := m.store.Put(context.Background(), agentID, text); err != nil {
+	if err := m.store.Put(ctx, agentID, text); err != nil {
 		return fmt.Errorf("graymatter: remember: %w", err)
 	}
 	if m.cfg.AsyncConsolidate {
@@ -98,10 +104,16 @@ func (m *Memory) Remember(agentID, text string) error {
 //	ctx := mem.Recall("sales-closer", "follow up Maria")
 //	systemPrompt += "\n\n## Memory\n" + strings.Join(ctx, "\n")
 func (m *Memory) Recall(agentID, query string) ([]string, error) {
+	return m.RecallCtx(context.Background(), agentID, query)
+}
+
+// RecallCtx is the context-aware variant of Recall.
+// Use this when you need timeout control or tracing propagation.
+func (m *Memory) RecallCtx(ctx context.Context, agentID, query string) ([]string, error) {
 	if m.store == nil {
 		return nil, nil // no-op mode
 	}
-	facts, err := m.store.Recall(context.Background(), agentID, query, m.cfg.TopK)
+	facts, err := m.store.Recall(ctx, agentID, query, m.cfg.TopK)
 	if err != nil {
 		return nil, fmt.Errorf("graymatter: recall: %w", err)
 	}
@@ -124,10 +136,15 @@ func (m *Memory) Consolidate(ctx context.Context, agentID string) error {
 // RememberShared stores an observation in the shared memory namespace,
 // readable by all agents via RecallShared and RecallAll.
 func (m *Memory) RememberShared(text string) error {
+	return m.RememberSharedCtx(context.Background(), text)
+}
+
+// RememberSharedCtx is the context-aware variant of RememberShared.
+func (m *Memory) RememberSharedCtx(ctx context.Context, text string) error {
 	if m.store == nil {
 		return nil
 	}
-	if err := m.store.PutShared(context.Background(), text); err != nil {
+	if err := m.store.PutShared(ctx, text); err != nil {
 		return fmt.Errorf("graymatter: remember shared: %w", err)
 	}
 	return nil
@@ -135,10 +152,15 @@ func (m *Memory) RememberShared(text string) error {
 
 // RecallShared returns the top-k most relevant shared facts for query.
 func (m *Memory) RecallShared(query string) ([]string, error) {
+	return m.RecallSharedCtx(context.Background(), query)
+}
+
+// RecallSharedCtx is the context-aware variant of RecallShared.
+func (m *Memory) RecallSharedCtx(ctx context.Context, query string) ([]string, error) {
 	if m.store == nil {
 		return nil, nil
 	}
-	facts, err := m.store.RecallShared(context.Background(), query, m.cfg.TopK)
+	facts, err := m.store.RecallShared(ctx, query, m.cfg.TopK)
 	if err != nil {
 		return nil, fmt.Errorf("graymatter: recall shared: %w", err)
 	}
@@ -148,10 +170,15 @@ func (m *Memory) RecallShared(query string) ([]string, error) {
 // RecallAll merges agent-scoped and shared memory results for agentID,
 // deduplicates, and returns at most TopK combined facts.
 func (m *Memory) RecallAll(agentID, query string) ([]string, error) {
+	return m.RecallAllCtx(context.Background(), agentID, query)
+}
+
+// RecallAllCtx is the context-aware variant of RecallAll.
+func (m *Memory) RecallAllCtx(ctx context.Context, agentID, query string) ([]string, error) {
 	if m.store == nil {
 		return nil, nil
 	}
-	facts, err := m.store.RecallAll(context.Background(), agentID, query, m.cfg.TopK)
+	facts, err := m.store.RecallAll(ctx, agentID, query, m.cfg.TopK)
 	if err != nil {
 		return nil, fmt.Errorf("graymatter: recall all: %w", err)
 	}
