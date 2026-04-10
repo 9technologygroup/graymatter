@@ -6,6 +6,9 @@
 <p align="center">
   <a href="https://github.com/angelnicolasc/graymatter/actions/workflows/ci.yml"><img src="https://github.com/angelnicolasc/graymatter/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://pkg.go.dev/github.com/angelnicolasc/graymatter"><img src="https://pkg.go.dev/badge/github.com/angelnicolasc/graymatter.svg" alt="Go Reference"></a>
+  <a href="https://github.com/angelnicolasc/graymatter/releases/tag/v0.2.0"><img src="https://img.shields.io/github/v/release/angelnicolasc/graymatter" alt="Latest Release"></a>
+  <img src="https://img.shields.io/badge/coverage-73.5%25-brightgreen" alt="Coverage 73.5%">
+  <img src="https://img.shields.io/badge/platforms-linux%20%7C%20macOS%20%7C%20windows-blue" alt="Platforms">
 </p>
 <div align="center">
   <strong>Three lines of code to give your AI agents persistent memory.</strong>
@@ -90,6 +93,16 @@ ctx := mem.Recall("sales-closer", "follow up Maria")
 // ["Maria didn't reply Wednesday. Third touchpoint due Friday."]
 ```
 
+Every method has a context-aware variant that respects deadlines and cancellation signals end-to-end — no wrappers needed:
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+defer cancel()
+
+if err := mem.RememberCtx(ctx, "agent", "observation"); err != nil { ... }
+results, err := mem.RecallCtx(ctx, "agent", "query")
+```
+
 ### Full agent pattern
 
 ```go
@@ -150,6 +163,50 @@ graymatter server --addr :8080                    # REST API server
 ```
 
 Global flags: `--dir` (data dir), `--quiet`, `--json`
+
+---
+
+## Observability
+
+The REST server (`graymatter server`) exposes a `/metrics` endpoint powered by Go's standard `expvar` package — zero extra dependencies.
+
+```
+GET /metrics
+```
+
+```json
+{
+  "requests_total":     {"remember": 120, "recall": 340, "healthz": 5},
+  "request_latency_us": {"remember": 4200, "recall": 1800},
+  "facts_total":        {"stored": 120},
+  "recall_total":       {"served": 340}
+}
+```
+
+For library users, `memory.StoreConfig` exposes hooks for APM integration:
+
+```go
+store, err := memory.Open(memory.StoreConfig{
+    DataDir:       ".graymatter",
+    DecayHalfLife: 30 * 24 * time.Hour,
+
+    // Called after every Recall with agent ID, query, result count, and latency.
+    OnRecall: func(agentID, query string, n int, d time.Duration) {
+        metrics.RecordHistogram("graymatter.recall.latency", d.Seconds())
+    },
+
+    // Called after every successful Put with agent ID, fact ID, and latency.
+    OnPut: func(agentID, factID string, d time.Duration) {
+        metrics.Increment("graymatter.facts.stored")
+    },
+
+    // Routes internal log events to any standard logger.
+    Logger: slog.NewLogLogger(slog.Default().Handler(), slog.LevelDebug),
+
+    // Swap the vector backend entirely — bring your own Qdrant, pgvector, etc.
+    VectorBackend: myQdrantAdapter,
+})
+```
 
 ---
 
@@ -287,20 +344,29 @@ Output: single static binary, ~10 MB, no runtime dependencies.
 
 ## Testing
 
-The full test suite requires no LLM and no network — all tests use
-`t.TempDir()` and a keyword embedder or injected stubs:
+The full test suite requires no LLM and no network — every test uses
+`t.TempDir()` with a keyword embedder or injected stubs. Runs clean on
+Linux, macOS, and Windows in CI.
 
 ```bash
-CGO_ENABLED=0 go test ./... -count=1 -timeout=120s
+# Core library
+go test -count=1 -timeout=120s ./pkg/memory/...
+
+# CLI / server / plugins
+cd cmd/graymatter && go test -count=1 -timeout=120s ./internal/...
 ```
 
 | Package | Tests | What's covered |
 |---------|-------|----------------|
-| `pkg/harness` | 16 | Agent file parsing, retry/backoff logic, session recovery |
-| `pkg/kg` | 21 | Graph CRUD, entity extraction, weight decay, Obsidian export |
-| `pkg/memory` | 6 | Shared memory namespace, RRF deduplication |
-| `pkg/plugin` | 10 | Install, list, remove, E2E echo plugin binary |
-| `pkg/server` | 9 | All REST endpoints, 400/503 error handling |
+| `pkg/memory` | 42 unit tests + 3 fuzz targets | Store lifecycle, hybrid recall, RRF fusion, decay math, semaphore, concurrent writes, vector paths, dimension guard |
+| `internal/harness` | 21 | Agent file parsing, retry/backoff, session recovery |
+| `internal/kg` | 21 | Graph CRUD, entity extraction, weight decay, Obsidian export |
+| `internal/server` | 11 | All REST endpoints, concurrent remember/recall, cancelled-context requests |
+| `internal/plugin` | 10 | Install, list, remove, E2E echo plugin binary |
+
+**Fuzz targets** (`pkg/memory`): `FuzzTokenize`, `FuzzUnmarshalFact`, `FuzzKeywordScore` — each with a seeded corpus so they run deterministically in CI and can be extended with `go test -fuzz`.
+
+**Core library coverage: 73.5%** (CI gate: ≥ 70%). Measured without mocks — real bbolt + chromem-go instances in a temp directory.
 
 Token-reduction benchmark (also zero deps):
 
@@ -335,9 +401,17 @@ packaged as a library you import in two lines.
 - [x] REST API server mode (`graymatter server --addr :8080`)
 - [x] Plugin system (JSON line protocol, `graymatter plugin install/list/remove`)
 - [x] 4-view Bubble Tea TUI (Memory / Sessions / Knowledge Graph / Stats)
+- [x] Context-propagation API (`RememberCtx`, `RecallCtx`, `RecallAllCtx`, …)
+- [x] Pluggable `VectorStore` interface (swap chromem-go for Qdrant, pgvector, etc.)
+- [x] expvar `/metrics` endpoint — zero-dep, stdlib-only observability
+- [x] `OnRecall` / `OnPut` / `Logger` hooks for APM integration
+- [x] Embedding dimension guard — warns on provider switch instead of silent corruption
+- [x] go.work workspace — core library imports zero TUI/CLI dependencies
+- [x] Three-platform CI (Linux, macOS, Windows) + 73.5% coverage gate
+- [x] Fuzz testing: `FuzzTokenize`, `FuzzUnmarshalFact`, `FuzzKeywordScore`
 - [ ] Ollama-backed consolidation LLM (Ollama as summariser, not just embedder)
 - [ ] WebSocket streaming for REST API
 
 ---
 
-*GrayMatter — april 2026*
+*GrayMatter — v0.2.0 — April 2026*
