@@ -10,6 +10,21 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.2.1] – 2026-04-11
+
+### Fixed
+
+**Windows UX — auto-register executable in User PATH**
+- `graymatter init` now writes the executable's directory to `HKCU\Environment\Path` via the Windows registry on first run, so users can type `graymatter` from any PowerShell session without prefixing `.\`. The operation is idempotent (no-op if the directory is already present) and best-effort (prints a warning to stderr but never fails the command).
+- A `WM_SETTINGCHANGE` broadcast is sent after the registry write so running shells receive the updated PATH without a full logoff/logon cycle.
+- No-op on macOS and Linux where the binary is placed in `/usr/local/bin`, which is already on PATH.
+
+**README install commands**
+- Pinned binary install URLs to the correct v0.2.1 GoReleaser asset names (`darwin_arm64`, `windows_amd64`).
+- Removed the `Move-Item ... C:\Windows\System32` step from the Windows instructions; PATH registration is now handled automatically by `graymatter init`.
+
+---
+
 ## [0.2.0] – 2026-04-10
 
 ### Added
@@ -129,5 +144,6 @@ See [`docs/api-stability.md`](docs/api-stability.md) for the list of stable publ
 
 See [`docs/api-stability.md`](docs/api-stability.md) for the list of stable public identifiers and the compatibility promise for the v0.x series.
 
+[0.2.1]: https://github.com/angelnicolasc/graymatter/releases/tag/v0.2.1
 [0.2.0]: https://github.com/angelnicolasc/graymatter/releases/tag/v0.2.0
 [0.1.0]: https://github.com/angelnicolasc/graymatter/releases/tag/v0.1.0
