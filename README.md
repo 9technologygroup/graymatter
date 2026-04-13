@@ -11,15 +11,19 @@
   <img src="https://img.shields.io/badge/platforms-linux%20%7C%20macOS%20%7C%20windows-blue" alt="Platforms">
   <img src="https://goreportcard.com/badge/github.com/angelnicolasc/graymatter" alt="Go Report Card">
   <img src="https://img.shields.io/github/license/angelnicolasc/graymatter" alt="License">
-</p>
 <div align="center">
-  <strong>Three lines of code to give your AI agents persistent memory.</strong>
-  <br />
-  Single Go binary. Zero infra. Works with Claude Code, or any tool that calls the Anthropic Messages API.
-  <br /><br />
-  Free, offline, no account required.
-</div>
+<br />
+
+<strong>Three lines of code to give your AI agents persistent memory and cut token usage by 90%.</strong>
 <br /><br />
+One binary. Drop it in. Run it. No Docker, no databases, no config files, no cloud accounts, no bullshit.
+<br /><br />
+Works with Claude Code and anything that calls the Anthropic Messages API.
+<br />
+Free. Offline. No account required.
+
+<br />
+</div>
 
 ```bash
 go get github.com/angelnicolasc/graymatter
