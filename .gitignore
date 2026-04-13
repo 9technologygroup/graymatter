@@ -4,4 +4,4 @@ dist/
 .graymatter/
 *.db
 /vectors/
-GRAYMATTER_PLAYBOOK.md
+*.md.local

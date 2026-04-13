@@ -27,20 +27,30 @@ func initCmd() *cobra.Command {
 				}
 			}
 
-			mcpJSON := ".mcp.json"
-			if _, err := os.Stat(mcpJSON); os.IsNotExist(err) {
-				content := `{
+			const mcpContent = `{
   "mcpServers": {
     "graymatter": {
       "command": "graymatter",
-      "args": ["mcp", "serve"],
-      "description": "Persistent memory for AI agents"
+      "args": ["mcp", "serve"]
     }
   }
 }
 `
-				if err := os.WriteFile(mcpJSON, []byte(content), 0o644); err != nil {
+			mcpJSON := ".mcp.json"
+			if _, err := os.Stat(mcpJSON); os.IsNotExist(err) {
+				if err := os.WriteFile(mcpJSON, []byte(mcpContent), 0o644); err != nil {
 					return fmt.Errorf("create .mcp.json: %w", err)
+				}
+			}
+
+			cursorMCPDir := ".cursor"
+			cursorMCPJSON := filepath.Join(cursorMCPDir, "mcp.json")
+			if _, err := os.Stat(cursorMCPJSON); os.IsNotExist(err) {
+				if err := os.MkdirAll(cursorMCPDir, 0o755); err != nil {
+					return fmt.Errorf("create .cursor dir: %w", err)
+				}
+				if err := os.WriteFile(cursorMCPJSON, []byte(mcpContent), 0o644); err != nil {
+					return fmt.Errorf("create .cursor/mcp.json: %w", err)
 				}
 			}
 
@@ -50,6 +60,7 @@ func initCmd() *cobra.Command {
 				fmt.Printf("  %s/vectors/      — chromem-go vector index\n", dir)
 				fmt.Printf("  %s/MEMORY.md     — human-readable index\n", dir)
 				fmt.Printf("  .mcp.json        — Claude Code MCP configuration\n")
+				fmt.Printf("  .cursor/mcp.json — Cursor MCP configuration\n")
 				fmt.Printf("\nNext steps:\n")
 				fmt.Printf("  graymatter remember \"my-agent\" \"user prefers bullet points\"\n")
 				fmt.Printf("  graymatter recall  \"my-agent\" \"how should I format this?\"\n")
