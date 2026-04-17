@@ -81,9 +81,28 @@ go get github.com/angelnicolasc/graymatter
 
 ---
 
+## How memories get stored
+
+There are **four** ways a fact ends up in the store. You don't have to pick one — they compose:
+
+| Path | Who calls it | When to use |
+|------|--------------|-------------|
+| `mem.Remember(ctx, agent, text)` | Your code, explicitly | You already know the exact string worth keeping. |
+| `mem.RememberExtracted(ctx, agent, llmResponse)` | Your code, on raw LLM output | You want GrayMatter to pull atomic facts out of a full response for you (LLM-assisted; falls back to storing the raw text if no API key is set). |
+| `memory_reflect` (MCP tool) | The LLM itself, mid-session | Claude Code / Cursor agents self-curate: add, update, forget, or link memories when they notice a contradiction, finish a task, or learn a preference. |
+| `Consolidate` (async, on by default) | Background goroutine | Summarises, decays, and prunes over time. Runs automatically after writes once `ConsolidateThreshold` is hit. |
+
+**Forgetting a single `Remember` call is not fatal.** `memory_reflect` lets the
+agent fix its own memory as it works, and `Consolidate` curates the store
+over time. That's why long interactive sessions in **Claude Code Desktop**
+and **Cursor** are a sweet spot for GrayMatter — not only 24/7 autonomous
+agents. The LLM maintains its own memory through MCP.
+
+---
+
 ## Library usage
 
-Three functions. That's the entire API surface. All methods accept `context.Context` as the first argument so timeouts and cancellation propagate end-to-end — no wrappers needed.
+Three functions cover 95% of use cases. All methods accept `context.Context` as the first argument so timeouts and cancellation propagate end-to-end — no wrappers needed.
 
 ```go
 import "github.com/angelnicolasc/graymatter"
@@ -139,9 +158,17 @@ messages := []anthropic.MessageParam{
 // 2. Call your LLM.
 response, _ := client.Messages.New(ctx, anthropic.MessageNewParams{...})
 
-// 3. Remember after the run.
-mem.Remember(ctx, skill.Name, extractKeyFacts(response))
+// 3a. If you already have a clean string worth keeping, store it directly.
+mem.Remember(ctx, skill.Name, "Maria prefers Slack over email; replies within 2h.")
+
+// 3b. Or let GrayMatter pull atomic facts out of the raw response for you.
+//     Uses ANTHROPIC_API_KEY if set; otherwise stores the raw text as a single fact.
+mem.RememberExtracted(ctx, skill.Name, responseText)
 ```
+
+> Inside Claude Code / Cursor you don't need either call — the LLM uses the
+> `memory_reflect` MCP tool to self-curate. See
+> [Claude Code / Cursor (MCP)](#claude-code--cursor-mcp) below.
 
 ### Config
 
