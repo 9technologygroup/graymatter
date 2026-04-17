@@ -127,6 +127,8 @@ func Run(ctx context.Context, cfg RunConfig) (*RunResult, error) {
 	if err := initHarnessBucket(db); err != nil {
 		return nil, fmt.Errorf("init harness bucket: %w", err)
 	}
+	// Ensure token_usage bucket exists (best-effort; accounting never breaks a run).
+	_ = initTokenUsageBucket(db)
 
 	// Allocate a new session ID for this run.
 	sessionID := ulid.Make().String()
@@ -215,6 +217,13 @@ func Run(ctx context.Context, cfg RunConfig) (*RunResult, error) {
 			}
 			continue
 		}
+
+		// Record token usage (best-effort; accounting never breaks a run).
+		_ = RecordTokenUsage(db, def.Name, def.Model,
+			uint64(msg.Usage.InputTokens),
+			uint64(msg.Usage.OutputTokens),
+			uint64(msg.Usage.CacheReadInputTokens),
+			uint64(msg.Usage.CacheCreationInputTokens))
 
 		// Extract text from response.
 		finalReply = extractText(msg)

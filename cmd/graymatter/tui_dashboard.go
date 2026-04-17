@@ -8,6 +8,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/angelnicolasc/graymatter/cmd/graymatter/internal/harness"
 )
 
 // ── Dashboard model ──────────────────────────────────────────────────────────
@@ -48,6 +50,12 @@ type dashboardData struct {
 	// Last-30-day facts-created histogram, oldest → newest.
 	DailyCreated [30]int
 	DailyStart   time.Time // date of DailyCreated[0]
+
+	// Token-cost ledger for the last 30 days (harness runs only). Loaded
+	// lazily from the `token_usage` bbolt bucket; Tokens.Loaded is false
+	// when the bucket is empty — in which case the panel renders an
+	// empty-state card instead of fabricating numbers.
+	Tokens harness.TokenUsageSummary
 }
 
 type dashboardLoadedMsg struct{ data dashboardData }
@@ -165,6 +173,15 @@ func (m tuiModel) loadDashboard() tea.Cmd {
 			return d.Agents[i].ID < d.Agents[j].ID
 		})
 
+		// Token usage is a cheap bucket scan (≤ agents × models × days rows).
+		// Never block the dashboard on it — if the bucket is missing or the
+		// query fails, the panel degrades to an empty-state card.
+		if db := store.DB(); db != nil {
+			if ts, err := harness.LoadTokenUsageSummary(db, 30); err == nil {
+				d.Tokens = ts
+			}
+		}
+
 		return dashboardLoadedMsg{d}
 	}
 }
@@ -202,16 +219,38 @@ func (m tuiModel) renderDashboard(h int) string {
 	// Row 1 — KPI strip.
 	kpiRow := m.renderKPIRow(d, w)
 
-	// Row 2 — Agents panel | Weight distribution panel (side-by-side).
+	// Row 2 — Agents panel (left) | [Token Cost (top) + Weight Distribution
+	// (bottom)] (right). Token Cost gets the hero slot in the right column:
+	// it's the metric a new reader cares about most (is this expensive?) and
+	// the cache-hit rate inside it is the virality hook.
+	//
+	// Width math (for symmetry with the full-width Activity panel below):
+	//   each panelBox renders as `width + 2` cols (border).
+	//   row2 outer = (leftW+2) + 1 (gutter) + (rightW+2) = leftW + rightW + 5
+	//   activity outer = w + 2
+	//   ⇒ leftW + rightW = w − 3 to make borders line up perfectly.
 	leftW := w * 3 / 5
-	rightW := w - leftW - 1
-	if rightW < 22 {
-		rightW = 22
-		leftW = w - rightW - 1
+	rightW := w - leftW - 3
+	if rightW < 26 {
+		rightW = 26
+		leftW = w - rightW - 3
 	}
 	agents := m.renderAgentsPanel(d, leftW)
-	weights := m.renderWeightPanel(d, rightW)
-	row2 := lipgloss.JoinHorizontal(lipgloss.Top, agents, " ", weights)
+	tokens := m.renderTokenPanel(d, rightW)
+
+	// Height alignment: render the natural-height panels first, then pad
+	// Weight Distribution downward so the right column matches the Agents
+	// panel exactly (single grid baseline at the bottom). lipgloss.Height
+	// counts border rows, so the arithmetic is direct.
+	agentsH := lipgloss.Height(agents)
+	tokensH := lipgloss.Height(tokens)
+	weightH := agentsH - tokensH
+	if weightH < 6 {
+		weightH = 6 // sanity floor: at least title + 1 row + footer + borders
+	}
+	weights := m.renderWeightPanel(d, rightW, weightH)
+	rightCol := lipgloss.JoinVertical(lipgloss.Left, tokens, weights)
+	row2 := lipgloss.JoinHorizontal(lipgloss.Top, agents, " ", rightCol)
 
 	// Row 3 — Activity sparkline panel (full width).
 	activity := m.renderActivityPanel(d, w)
@@ -221,8 +260,15 @@ func (m tuiModel) renderDashboard(h int) string {
 }
 
 // renderKPIRow renders the 4-tile CodeBurn-style KPI strip.
+//
+// Width math (matches Activity panel border for vertical alignment):
+//   each kpiBlock renders as `tileW + 2` cols (border).
+//   row outer = 4*(tileW+2) + 3 gutters = 4*tileW + 11
+//   activity outer = width + 2
+//   ⇒ tileW = (width − 9) / 4 so all four borders share a column with
+//     the borders of the Agents/Activity panels below.
 func (m tuiModel) renderKPIRow(d dashboardData, width int) string {
-	tileW := width / 4
+	tileW := (width - 9) / 4
 	if tileW < 14 {
 		tileW = 14
 	}
@@ -259,7 +305,10 @@ func (m tuiModel) renderKPIRow(d dashboardData, width int) string {
 }
 
 // renderAgentsPanel renders the "Inventory vs Activity" panel: per agent,
-// two stacked bars — fact count (cyan) and recall count (amber).
+// two stacked bars — fact count (cyan) and recall count (amber). Both series
+// share a single global scale so cross-agent and cross-series comparison is
+// visually honest. Values are right-aligned past the bar, and a faint dotted
+// rule separates consecutive agents.
 func (m tuiModel) renderAgentsPanel(d dashboardData, width int) string {
 	if width < 20 {
 		width = 20
@@ -268,15 +317,16 @@ func (m tuiModel) renderAgentsPanel(d dashboardData, width int) string {
 	// Figure out column widths inside the panel (width-2 for borders, -2 for padding).
 	inner := width - 4
 
-	// Max across agents for normalization.
-	maxFacts, maxRecalls := 0, 0
+	// Single global max across both series so a recall of 48 and a fact of 7
+	// render at honest relative sizes (44% vs 15%, not 100% vs 35%).
+	globalMax := 0
 	maxName := 0
 	for _, a := range d.Agents {
-		if a.Facts > maxFacts {
-			maxFacts = a.Facts
+		if a.Facts > globalMax {
+			globalMax = a.Facts
 		}
-		if a.Recalls > maxRecalls {
-			maxRecalls = a.Recalls
+		if a.Recalls > globalMax {
+			globalMax = a.Recalls
 		}
 		if n := lipgloss.Width(a.ID); n > maxName {
 			maxName = n
@@ -286,8 +336,8 @@ func (m tuiModel) renderAgentsPanel(d dashboardData, width int) string {
 		maxName = 18
 	}
 
-	// Reserve: name | value | bar
-	valueW := 6
+	// Reserve: name | bar | value-right.
+	valueW := 5
 	barW := inner - maxName - valueW - 2
 	if barW < 8 {
 		barW = 8
@@ -306,27 +356,34 @@ func (m tuiModel) renderAgentsPanel(d dashboardData, width int) string {
 		}
 
 		nameCell := styleSubText.Render(padRight(name, maxName))
-
-		factsVal := lipgloss.NewStyle().Foreground(colorCyan).Render(
-			padRight(formatCompact(a.Facts), valueW))
-		factsBar := hbar(float64(a.Facts), float64(maxFacts), barW, colorCyan)
-		rows = append(rows, nameCell+" "+factsVal+" "+factsBar)
-
 		blank := strings.Repeat(" ", maxName)
-		recallsVal := lipgloss.NewStyle().Foreground(colorAmber).Render(
-			padRight(formatCompact(a.Recalls), valueW))
-		recallsBar := hbar(float64(a.Recalls), float64(maxRecalls), barW, colorAmber)
-		rows = append(rows, blank+" "+recallsVal+" "+recallsBar)
 
+		factsBar := hbarSlim(float64(a.Facts), float64(globalMax), barW, colorCyan)
+		factsVal := lipgloss.NewStyle().Foreground(colorCyan).Render(
+			padLeft(formatCompact(a.Facts), valueW))
+		rows = append(rows, nameCell+" "+factsBar+" "+factsVal)
+
+		recallsBar := hbarSlim(float64(a.Recalls), float64(globalMax), barW, colorAmber)
+		recallsVal := lipgloss.NewStyle().Foreground(colorAmber).Render(
+			padLeft(formatCompact(a.Recalls), valueW))
+		rows = append(rows, blank+" "+recallsBar+" "+recallsVal)
+
+		// Dotted separator between agents — guides the eye without the
+		// density of a blank row alone.
 		if i < limit-1 {
-			rows = append(rows, "")
+			sepLen := inner
+			if sepLen < 0 {
+				sepLen = 0
+			}
+			sep := styleHelpSep.Render(strings.Repeat("·", sepLen))
+			rows = append(rows, sep)
 		}
 	}
 
 	legend := styleDimText.Render(
-		"  " + lipgloss.NewStyle().Foreground(colorCyan).Render("■") +
+		"  " + lipgloss.NewStyle().Foreground(colorCyan).Render("▄") +
 			" facts    " +
-			lipgloss.NewStyle().Foreground(colorAmber).Render("■") +
+			lipgloss.NewStyle().Foreground(colorAmber).Render("▄") +
 			" recalls",
 	)
 	rows = append(rows, "", legend)
@@ -336,8 +393,9 @@ func (m tuiModel) renderAgentsPanel(d dashboardData, width int) string {
 }
 
 // renderWeightPanel renders the weight-distribution histogram + corpus
-// oldest/newest timestamps.
-func (m tuiModel) renderWeightPanel(d dashboardData, width int) string {
+// oldest/newest timestamps. outerH (≤0 = natural) lets the caller force
+// the panel to a target height so it stacks flush against a taller sibling.
+func (m tuiModel) renderWeightPanel(d dashboardData, width, outerH int) string {
 	if width < 20 {
 		width = 20
 	}
@@ -374,25 +432,30 @@ func (m tuiModel) renderWeightPanel(d dashboardData, width int) string {
 		rows = append(rows, labelCell+" "+bar+" "+pctCell)
 	}
 
-	rows = append(rows, "", styleDimText.Render("  Corpus age"))
-	if !d.OldestAt.IsZero() {
-		rows = append(rows, styleSubText.Render(
-			"  oldest  "+d.OldestAt.Format("2006-01-02")))
+	// Compact footer: average weight + corpus span on one dim line. The
+	// Token Cost panel now owns the top half of the right column, so Weight
+	// Distribution is squeezed to its essentials.
+	var span string
+	if !d.OldestAt.IsZero() && !d.NewestAt.IsZero() {
+		span = fmt.Sprintf(
+			"%s → %s",
+			d.OldestAt.Format("01-02"),
+			d.NewestAt.Format("01-02"),
+		)
 	}
-	if !d.NewestAt.IsZero() {
-		rows = append(rows, styleSubText.Render(
-			"  newest  "+d.NewestAt.Format("2006-01-02")))
-	}
-	rows = append(rows, styleSubText.Render(
-		fmt.Sprintf("  avg     %.3f", d.AvgWeight)))
+	rows = append(rows, styleDimText.Render(fmt.Sprintf(
+		"  avg %.2f · %s", d.AvgWeight, span)))
 
 	body := lipgloss.JoinVertical(lipgloss.Left, rows...)
-	return panelBox("Weight Distribution", width, body)
+	return panelBoxH("Weight Distribution", width, outerH, body)
 }
 
 // renderActivityPanel renders the 30-day facts-created sparkline. Honest
 // label — graymatter doesn't persist retrieval history, so this reflects
 // fact-creation velocity, not recalls-per-day.
+//
+// The peak value is anchored above the tallest sparkline cell so the reader
+// can see the magnitude in context, not just as a footer fact.
 func (m tuiModel) renderActivityPanel(d dashboardData, width int) string {
 	if width < 40 {
 		width = 40
@@ -403,13 +466,31 @@ func (m tuiModel) renderActivityPanel(d dashboardData, width int) string {
 	// the panel with a short label on the left.
 	sparkWidth := len(d.DailyCreated)
 	leftLabel := styleSubText.Render(padRight("30d", 4))
+	blankLeft := strings.Repeat(" ", lipgloss.Width("30d"))
 	sparkline := spark(d.DailyCreated[:], colorAmber)
 
-	peak := 0
-	for _, v := range d.DailyCreated {
+	peak, peakIdx := 0, -1
+	for i, v := range d.DailyCreated {
 		if v > peak {
 			peak = v
+			peakIdx = i
 		}
+	}
+
+	// Peak anchor: number centred over the tallest cell. Left-pad with the
+	// same spacing the sparkline uses so the label aligns column-accurate.
+	var peakRow string
+	if peak > 0 && peakIdx >= 0 {
+		peakStr := fmt.Sprintf("%d", peak)
+		// Centre the label over the peak cell by shifting left by half
+		// the label width (but never past the sparkline origin).
+		shift := peakIdx - lipgloss.Width(peakStr)/2
+		if shift < 0 {
+			shift = 0
+		}
+		anchor := strings.Repeat(" ", shift)
+		peakLbl := lipgloss.NewStyle().Foreground(colorAmber).Bold(true).Render(peakStr)
+		peakRow = blankLeft + " " + anchor + peakLbl
 	}
 
 	line1 := leftLabel + " " + sparkline
@@ -420,17 +501,22 @@ func (m tuiModel) renderActivityPanel(d dashboardData, width int) string {
 	if footerSpace < 1 {
 		footerSpace = 1
 	}
-	dateRow := "    " + styleDimText.Render(
+	dateRow := blankLeft + " " + styleDimText.Render(
 		startLbl+strings.Repeat(" ", footerSpace)+endLbl,
 	)
 
 	meta := styleDimText.Render(fmt.Sprintf(
-		"  peak %d facts/day · total %d in window",
-		peak, sumInts(d.DailyCreated[:]),
+		"  total %d in window",
+		sumInts(d.DailyCreated[:]),
 	))
 
 	_ = inner
-	body := lipgloss.JoinVertical(lipgloss.Left, line1, dateRow, "", meta)
+	var body string
+	if peakRow != "" {
+		body = lipgloss.JoinVertical(lipgloss.Left, peakRow, line1, dateRow, "", meta)
+	} else {
+		body = lipgloss.JoinVertical(lipgloss.Left, line1, dateRow, "", meta)
+	}
 	return panelBox("Activity · Facts Created (last 30 days)", width, body)
 }
 
@@ -440,4 +526,112 @@ func sumInts(xs []int) int {
 		s += x
 	}
 	return s
+}
+
+// renderTokenPanel renders the "Token Cost · 30d" card: total USD spent in
+// window, a cache-hit-rate hero line (the virality hook — prompt caching is
+// where graymatter's memory layer actually saves the user money), and a
+// per-model breakdown. Empty-state when no harness runs have been recorded.
+//
+// All numbers come from the `token_usage` bbolt bucket, populated by
+// harness.RecordTokenUsage on every successful Anthropic call — zero
+// estimation, zero extrapolation.
+func (m tuiModel) renderTokenPanel(d dashboardData, width int) string {
+	if width < 24 {
+		width = 24
+	}
+	ts := d.Tokens
+
+	// Empty state: no harness runs yet. Render a single-line hint so the
+	// panel isn't a floating blank — it should look intentional, not broken.
+	if !ts.Loaded || ts.Requests == 0 {
+		lines := []string{
+			styleDimText.Render("  No agent runs yet."),
+			styleDimText.Render("  Tracked automatically on"),
+			styleDimText.Render("  " + lipgloss.NewStyle().Foreground(colorCyan).Render("graymatter run") + "."),
+		}
+		body := lipgloss.JoinVertical(lipgloss.Left, lines...)
+		return panelBox("Token Cost · 30d", width, body)
+	}
+
+	// Hero line: big USD total in purple + tiny "last 30d" annotation.
+	totalStyle := lipgloss.NewStyle().Bold(true).Foreground(colorPurple)
+	hero := totalStyle.Render(formatUSD(ts.TotalUSD)) +
+		" " + styleDimText.Render(fmt.Sprintf("· %s reqs", formatCompact(int(ts.Requests))))
+	if ts.Partial {
+		hero += " " + styleDimText.Render("(partial)")
+	}
+
+	// Cache-hit headline: the most compelling number for social. Colour
+	// scales with hit rate so a healthy setup literally glows green.
+	hitPct := ts.CacheHitRate * 100
+	hitColor := colorRose
+	switch {
+	case hitPct >= 60:
+		hitColor = colorMint
+	case hitPct >= 30:
+		hitColor = colorAmber
+	}
+	hitLine := styleDimText.Render("cache hit ") +
+		lipgloss.NewStyle().Foreground(hitColor).Bold(true).Render(
+			fmt.Sprintf("%.0f%%", hitPct)) +
+		"  " + styleDimText.Render(fmt.Sprintf(
+			"%s reads · %s fresh",
+			formatCompact(int(ts.CacheRead)),
+			formatCompact(int(ts.Input)),
+		))
+
+	rows := []string{hero, hitLine, ""}
+
+	// Per-model breakdown — one line per model, share% rendered as a slim
+	// cyan bar. Up to 3 models (more would blow the compact right column).
+	if len(ts.ByModel) > 0 {
+		rows = append(rows, styleDimText.Render("  by model"))
+		inner := width - 4
+		modelW := 10
+		costW := 7
+		barW := inner - modelW - costW - 2
+		if barW < 6 {
+			barW = 6
+		}
+		limit := len(ts.ByModel)
+		if limit > 3 {
+			limit = 3
+		}
+		for i := 0; i < limit; i++ {
+			mb := ts.ByModel[i]
+			label := mb.Model
+			if lipgloss.Width(label) > modelW {
+				label = label[:modelW-1] + "…"
+			}
+			bar := hbarSlim(mb.Sharepct, 100, barW, colorCyan)
+			costCell := lipgloss.NewStyle().Foreground(colorWhite).Render(
+				padLeft(formatUSD(mb.CostUSD), costW))
+			rows = append(rows,
+				styleSubText.Render(padRight(label, modelW))+" "+bar+" "+costCell)
+		}
+	}
+
+	body := lipgloss.JoinVertical(lipgloss.Left, rows...)
+	return panelBox("Token Cost · 30d", width, body)
+}
+
+// formatUSD renders a USD amount with sensible precision for a dashboard:
+// "$0.00" below a dollar, "$12.84" in the common range, "$1.4K" and "$2.3M"
+// when the spend gets loud. Always prefixed with "$" so it's unambiguous.
+func formatUSD(v float64) string {
+	abs := v
+	if abs < 0 {
+		abs = -abs
+	}
+	switch {
+	case abs < 1:
+		return fmt.Sprintf("$%.2f", v)
+	case abs < 1000:
+		return fmt.Sprintf("$%.2f", v)
+	case abs < 1_000_000:
+		return fmt.Sprintf("$%.1fK", v/1000)
+	default:
+		return fmt.Sprintf("$%.1fM", v/1_000_000)
+	}
 }

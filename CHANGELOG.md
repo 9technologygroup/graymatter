@@ -10,6 +10,39 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.4.0] – 2026-04-16
+
+### Added
+
+**Token Cost panel in the observability dashboard**
+- New `Token Cost · 30d` card on the Stats tab aggregates input / output / cache-read / cache-write tokens per agent, per model, per day, with USD cost computed from the public Anthropic price list (`cmd/graymatter/internal/harness/pricing.go`).
+- Cache-hit-rate headline with dynamic colour thresholds (mint ≥ 60%, amber ≥ 30%, rose otherwise) surfaces the real savings from prompt caching.
+- Per-model breakdown (top 3 by spend) with a proportional share bar.
+- Bucket schema (`token_usage`) is pre-aggregated on write (key `{agent}|{model}|{yyyymmdd}`), so the hot path is a single bbolt `Put` and the read path is bounded by `agents × models × days`.
+
+**Honest empty-state handling**
+- Panel renders a friendly hint when the bucket is empty (`No agent runs yet — Tracked automatically on graymatter run`). Unknown models are flagged as `Partial`; the UI never fabricates a cost.
+
+### Changed
+
+**Dashboard grid is now strictly symmetric**
+- Width math reworked so the KPI strip, the Agents / (Token Cost + Weight Distribution) row, and the Activity panel share the same outer border columns (1-column gutters accounted for explicitly).
+- New height-aware `panelBoxH` helper in `tui_styles.go` lets the right-column stack pad down to the exact line count of the Agents panel, so bottom borders align on a single grid baseline.
+- Weight Distribution footer collapsed to a compact `avg · oldest → newest` line to free vertical space for the new Token Cost panel above it.
+
+### Internal
+
+- `harness.RecordTokenUsage(db, agent, model, input, output, cacheRead, cacheWrite)` is invoked best-effort from `runner.go` immediately after every successful `client.Messages.New` call. Accounting failures never break a run.
+- Added `TestDashboardRender_WithTokens` and `TestFormatUSD` to lock in panel output and USD formatting.
+
+---
+
+## [0.3.0] – 2026-04-13
+
+Observability dashboard redesign (KPI strip, Agents inventory-vs-activity panel, weight distribution, activity sparkline). See commit `20758a2`.
+
+---
+
 ## [0.2.1] – 2026-04-11
 
 ### Fixed

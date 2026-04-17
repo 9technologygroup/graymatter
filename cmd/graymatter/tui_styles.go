@@ -118,15 +118,31 @@ var (
 )
 
 // panelBox wraps body in a rounded-border panel with a coloured title.
-// Width is the outer width — the border subtracts 2 internally.
+// Width is the *content + padding* width — the border adds 2 columns
+// on top, so the rendered outer width is `width + 2`.
 func panelBox(title string, width int, body string) string {
+	return panelBoxH(title, width, 0, body)
+}
+
+// panelBoxH is the height-aware variant of panelBox. When outerH > 0 the
+// rendered panel is padded down to exactly outerH lines (border included),
+// so two stacked panels can be made to match a taller neighbour for
+// perfect grid alignment. outerH ≤ 0 falls back to natural content height.
+func panelBoxH(title string, width, outerH int, body string) string {
 	if width < 10 {
 		width = 10
 	}
 	inner := width - 2
 	titleLine := stylePanelTitle.Render("▸ " + title)
 	content := lipgloss.JoinVertical(lipgloss.Left, titleLine, body)
-	return stylePanel.Width(inner).Render(content)
+	s := stylePanel.Width(inner)
+	if outerH > 2 {
+		// Subtract 2 for the top/bottom border rows; lipgloss pads the
+		// remaining space below the content with blanks (default vertical
+		// alignment is top, which is exactly what we want).
+		s = s.Height(outerH - 2)
+	}
+	return s.Render(content)
 }
 
 // kpiBlock renders a single KPI tile: label, value, optional unit.
@@ -268,6 +284,62 @@ func padRight(s string, width int) string {
 		return s
 	}
 	return s + strings.Repeat(" ", width-w)
+}
+
+// padLeft right-aligns s within a field of the given display width. Uses
+// lipgloss.Width for ANSI-aware measurement so padding counts glyphs, not
+// escape bytes. Handy for numeric columns where the value sits at the end.
+func padLeft(s string, width int) string {
+	w := lipgloss.Width(s)
+	if w >= width {
+		return s
+	}
+	return strings.Repeat(" ", width-w) + s
+}
+
+// hbarSlim renders a half-height horizontal bar using the lower-block glyph
+// `▄`. It leaves the top half of every cell blank, which visually reads as a
+// thin rule instead of a solid block — the right shape for two-series
+// comparisons (e.g. inventory + activity rows stacked per agent) where the
+// full-block `hbar` would smear the two colours into one dense bar.
+//
+// Sub-cell precision is preserved via the left-bottom quadrant `▖`: anything
+// from 1/8 to a full cell renders as either `▖` (tail) or `▄` (full). The
+// coarse partial set is deliberate — at 15–18 px cell heights most fonts
+// render mid-sub-cell glyphs with jitter; `▄/▖` always line up cleanly.
+func hbarSlim(value, max float64, width int, c lipgloss.Color) string {
+	if width <= 0 {
+		return ""
+	}
+	if max <= 0 {
+		max = 1
+	}
+	ratio := value / max
+	if ratio < 0 {
+		ratio = 0
+	}
+	if ratio > 1 {
+		ratio = 1
+	}
+	total := ratio * float64(width)
+	full := int(total)
+	frac := total - float64(full)
+
+	var b strings.Builder
+	for i := 0; i < full && i < width; i++ {
+		b.WriteRune('▄')
+	}
+	if full < width {
+		if frac >= 0.25 {
+			b.WriteRune('▖')
+		} else {
+			b.WriteRune(' ')
+		}
+		for i := full + 1; i < width; i++ {
+			b.WriteRune(' ')
+		}
+	}
+	return lipgloss.NewStyle().Foreground(c).Render(b.String())
 }
 
 // border picks the active/inactive border style.
