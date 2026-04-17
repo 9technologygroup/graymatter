@@ -240,11 +240,22 @@ store, err := memory.Open(memory.StoreConfig{
 
 ## Claude Code / Cursor (MCP)
 
+Run once inside your project:
+
 ```bash
-graymatter init     # creates .mcp.json automatically
+graymatter init
 ```
 
-Claude Code detects `.mcp.json` automatically. Five tools become available:
+This writes two config files so both editors pick up the MCP server with
+zero extra steps:
+
+| File | Used by |
+|------|---------|
+| `.mcp.json` | Claude Code (project-scoped) |
+| `.cursor/mcp.json` | Cursor (project-scoped) |
+
+Then **restart Cursor / Claude Code** (or toggle the MCP server off/on in
+`Settings → MCP`). Five tools become available:
 
 | Tool | What it does |
 |------|-------------|
@@ -254,7 +265,11 @@ Claude Code detects `.mcp.json` automatically. Five tools become available:
 | `checkpoint_resume` | Restore last checkpoint |
 | `memory_reflect` | Add / update / forget / link memories (agent self-edit) |
 
-Or add manually to your project's `.mcp.json`:
+### Global install (all projects)
+
+If you'd rather not run `graymatter init` in every repo, drop the same
+JSON into the editor's global config — `~/.cursor/mcp.json` for Cursor,
+`~/.claude/mcp.json` for Claude Code:
 
 ```json
 {
@@ -266,6 +281,10 @@ Or add manually to your project's `.mcp.json`:
   }
 }
 ```
+
+`graymatter` must be on `PATH`. The `init` command handles this
+automatically on Windows via the User `PATH` registry; on macOS / Linux
+the recommended install path `/usr/local/bin` is already on `PATH`.
 
 ---
 
