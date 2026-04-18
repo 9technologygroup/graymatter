@@ -18,8 +18,12 @@
 <br /><br />
 One binary. Drop it in. Run it. No Docker, no databases, no config files, no cloud accounts, no bullshit.
 <br /><br />
-Works with Claude Code and anything that calls the Anthropic Messages API.
+<strong>General-purpose MCP server. Zero vendor lock-in.</strong>
 <br />
+Works with Claude Code, Cursor, Codex, OpenCode, Antigravity — and any MCP-compatible client.
+<br />
+Also a plain Go library if you don't use MCP.
+<br /><br />
 Free. Offline. No account required.
 
 <br />
@@ -58,12 +62,12 @@ No Docker. No Redis. No Python. No API key required for storage.
 
 ```bash
 # macOS (Apple Silicon)
-curl -sSL -o graymatter.tar.gz https://github.com/angelnicolasc/graymatter/releases/download/v0.4.0/graymatter_0.4.0_darwin_arm64.tar.gz
+curl -sSL -o graymatter.tar.gz https://github.com/angelnicolasc/graymatter/releases/download/v0.5.0/graymatter_0.5.0_darwin_arm64.tar.gz
 tar -xzf graymatter.tar.gz
 sudo mv graymatter /usr/local/bin/
 
 # Windows (PowerShell)
-iwr https://github.com/angelnicolasc/graymatter/releases/download/v0.4.0/graymatter_0.4.0_windows_amd64.zip -OutFile graymatter.zip
+iwr https://github.com/angelnicolasc/graymatter/releases/download/v0.5.0/graymatter_0.5.0_windows_amd64.zip -OutFile graymatter.zip
 Expand-Archive graymatter.zip -DestinationPath .\graymatter_cli
 ```
 
@@ -265,24 +269,34 @@ store, err := memory.Open(memory.StoreConfig{
 
 ---
 
-## Claude Code / Cursor (MCP)
-
-Run once inside your project:
+## MCP clients (drop-in)
 
 ```bash
 graymatter init
 ```
 
-This writes two config files so both editors pick up the MCP server with
-zero extra steps:
+One command auto-wires GrayMatter into every supported client at once.
+Existing entries from other MCP servers are **merged, not overwritten** —
+safe to run in any repo.
 
-| File | Used by |
-|------|---------|
-| `.mcp.json` | Claude Code (project-scoped) |
-| `.cursor/mcp.json` | Cursor (project-scoped) |
+| Client | Config file auto-wired | Scope |
+|--------|------------------------|-------|
+| Claude Code | `.mcp.json` | project |
+| Cursor | `.cursor/mcp.json` | project |
+| Codex (OpenAI) | `~/.codex/config.toml` | home |
+| OpenCode | `opencode.jsonc` | project |
+| Antigravity (Google) | `mcp_config.json` | project (opt-in: `--with-antigravity`) |
 
-Then **restart Cursor / Claude Code** (or toggle the MCP server off/on in
-`Settings → MCP`). Five tools become available:
+Narrow down what gets wired:
+
+```bash
+graymatter init --only claudecode,cursor     # whitelist
+graymatter init --skip-codex --skip-opencode # blacklist
+graymatter init --with-antigravity           # include opt-in clients
+```
+
+Then **restart your editor** (or toggle the MCP server off/on in its
+settings). Five tools become available:
 
 | Tool | What it does |
 |------|-------------|
@@ -291,6 +305,19 @@ Then **restart Cursor / Claude Code** (or toggle the MCP server off/on in
 | `checkpoint_save` | Snapshot current session |
 | `checkpoint_resume` | Restore last checkpoint |
 | `memory_reflect` | Add / update / forget / link memories (agent self-edit) |
+
+### Any other MCP-compatible client
+
+GrayMatter speaks plain MCP. If your client isn't on the table above,
+point it at the binary:
+
+```bash
+graymatter mcp serve              # stdio transport
+graymatter mcp serve --http :8080 # HTTP transport
+```
+
+The schema is identical to every other MCP server — `command` +
+`args: ["mcp", "serve"]`. No proprietary glue.
 
 ### Global install (all projects)
 
@@ -452,6 +479,7 @@ go run ./benchmarks/token_count
 
 ## What GrayMatter is NOT
 
+- Not tied to any vendor. It's an MCP server + Go library — not a Claude-Code-only or Cursor-only tool.
 - Not a framework. Not an agent runner. Not a replacement for your existing tooling.
 - Not a hosted service. Not a SaaS. Not a cloud product.
 - Not a knowledge base UI. Not Notion. Not Obsidian.
@@ -493,4 +521,4 @@ packaged as a library you import in two lines.
 
 ---
 
-*GrayMatter — v0.4.0 — April 2026*
+*GrayMatter — v0.5.0 — April 2026*

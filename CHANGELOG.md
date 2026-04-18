@@ -10,6 +10,31 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [0.5.0] – 2026-04-18
+
+### Added
+
+**Auto-grab for every major MCP-compatible client**
+- `graymatter init` now wires the MCP server into Claude Code, Cursor, Codex (OpenAI), OpenCode, and Antigravity (Google) with a single command.
+- New writers: `writeClaudeCodeProject`, `writeCursorProject`, `writeCodexHome`, `writeOpencodeProject`, `writeAntigravityProject` (`cmd/graymatter/cmd_init_writers.go`).
+- Codex support handles the TOML schema at `~/.codex/config.toml` (`[mcp_servers.graymatter]`) and preserves unrelated keys.
+- OpenCode writes `opencode.jsonc`; if the existing file uses JSONC comments we fail soft and print the exact snippet to paste.
+- Antigravity is opt-in (`--with-antigravity`) since it's still community-documented.
+- New flags: `--skip-claudecode`, `--skip-cursor`, `--skip-codex`, `--skip-opencode`, `--with-antigravity`, `--only <csv>`.
+- 7 new tests in `cmd/graymatter/cmd_init_writers_test.go` covering first-write, merge-preserving-other-servers, idempotency on second run, TOML round-trip for Codex, JSONC fail-soft for OpenCode, Antigravity opt-in, and `--only` parsing.
+
+### Changed
+
+- `graymatter init` now **merges** MCP entries instead of skipping files that already exist. Pre-existing servers from other tools are preserved; `graymatter` is upserted.
+- README hero re-framed around "general-purpose MCP server, zero vendor lock-in" — the old section `Claude Code / Cursor (MCP)` is now `MCP clients (drop-in)` with the full client table.
+- `README` and footer bumped to `v0.5.0`.
+
+### Internal
+
+- New dep: `github.com/BurntSushi/toml v1.4.0` (pure-Go, zero transitive deps) for Codex config round-trip.
+
+---
+
 ## [0.4.0] – 2026-04-16
 
 ### Added
